@@ -124,6 +124,45 @@ class FerrawinQuery
     }
 
     /**
+     * Obtiene solo la cabecera de una planilla (sin elementos).
+     */
+    public static function getCabeceraPlanilla(string $codigo): ?object
+    {
+        $partes = explode('-', $codigo, 2);
+
+        if (count($partes) !== 2) {
+            return null;
+        }
+
+        [$zconta, $zcodigo] = $partes;
+
+        $pdo = Database::getConnection();
+
+        $sql = "
+            SELECT
+                p.ZCODCLI as codigo_cliente,
+                p.ZCLIENTE as nombre_cliente,
+                p.ZCODIGO as codigo_obra,
+                p.ZNOMBRE as nombre_obra,
+                p.ZPOBLA as ensamblado,
+                oh.ZMODULO as seccion,
+                oh.ZFECHA as fecha,
+                oh.ZNOMBRE as descripcion_planilla
+            FROM ORD_HEAD oh
+            LEFT JOIN PROJECT p ON oh.ZCODOBRA = p.ZCODIGO
+            WHERE oh.ZCONTA = :zconta AND oh.ZCODIGO = :zcodigo
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([
+            'zconta' => $zconta,
+            'zcodigo' => $zcodigo,
+        ]);
+
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
      * Obtiene todos los datos de una planilla específica.
      */
     public static function getDatosPlanilla(string $codigo): array
@@ -189,11 +228,32 @@ class FerrawinQuery
 
     /**
      * Formatea los datos para enviar a la API.
+     * Si no hay elementos, obtiene solo la cabecera.
      */
     public static function formatearParaApi(array $datos, string $codigo): array
     {
+        // Si no hay elementos, obtener solo la cabecera
         if (empty($datos)) {
-            return [];
+            $cabecera = self::getCabeceraPlanilla($codigo);
+
+            if (!$cabecera) {
+                return [];
+            }
+
+            return [
+                'codigo' => $codigo,
+                'descripcion' => $cabecera->descripcion_planilla ?? null,
+                'seccion' => $cabecera->seccion ?? null,
+                'ensamblado' => $cabecera->ensamblado ?? null,
+                'fecha_creacion_ferrawin' => $cabecera->fecha ?? null,
+                'elementos' => [],
+                'sin_elementos' => true,
+                // Datos de cliente/obra para resolver en el servidor
+                'codigo_cliente' => $cabecera->codigo_cliente ?? '',
+                'nombre_cliente' => $cabecera->nombre_cliente ?? '',
+                'codigo_obra' => $cabecera->codigo_obra ?? '',
+                'nombre_obra' => $cabecera->nombre_obra ?? '',
+            ];
         }
 
         $primerElemento = $datos[0];

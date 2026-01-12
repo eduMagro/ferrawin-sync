@@ -104,12 +104,11 @@ $sql = "
     SELECT DISTINCT
         oh.ZCONTA + '-' + oh.ZCODIGO as codigo
     FROM ORD_HEAD oh
-    INNER JOIN ORD_BAR ob ON oh.ZCONTA = ob.ZCONTA AND oh.ZCODIGO = ob.ZCODIGO
-    WHERE 1=1 {$whereAño} {$whereDesdeCodigo}
+    WHERE oh.ZTIPOORD = 'P' {$whereAño} {$whereDesdeCodigo}
     ORDER BY codigo DESC
 ";
 
-Logger::info("Buscando planillas con datos...", ['año' => $año ?: 'todos', 'limite' => $limite ?: 'sin límite']);
+Logger::info("Buscando planillas...", ['año' => $año ?: 'todos', 'limite' => $limite ?: 'sin límite']);
 
 $stmt = $pdo->query($sql);
 $codigos = [];
@@ -123,7 +122,7 @@ if ($limite && count($codigos) > $limite) {
 }
 
 $total = count($codigos);
-Logger::info("Encontradas {$total} planillas CON DATOS");
+Logger::info("Encontradas {$total} planillas");
 
 if ($dryRun) {
     echo "\n[DRY-RUN] Planillas que se sincronizarían: {$total}\n";
@@ -171,12 +170,7 @@ foreach ($codigos as $i => $codigo) {
     try {
         $datos = FerrawinQuery::getDatosPlanilla($codigo);
 
-        if (empty($datos)) {
-            Logger::warning("{$progreso} Planilla vacía: {$codigo}");
-            $vacias++;
-            continue;
-        }
-
+        // Formatear planilla (obtiene cabecera aunque no haya elementos)
         $planilla = FerrawinQuery::formatearParaApiConEnsamblajes($datos, $codigo);
 
         if (empty($planilla)) {
@@ -186,7 +180,13 @@ foreach ($codigos as $i => $codigo) {
         }
 
         $numElementos = count($planilla['elementos'] ?? []);
-        Logger::info("{$progreso} Preparando {$codigo} ({$numElementos} elementos)");
+        $sinElementos = $planilla['sin_elementos'] ?? false;
+
+        if ($sinElementos) {
+            Logger::info("{$progreso} Preparando {$codigo} (sin elementos - solo cabecera)");
+        } else {
+            Logger::info("{$progreso} Preparando {$codigo} ({$numElementos} elementos)");
+        }
 
         $batch[] = $planilla;
 
