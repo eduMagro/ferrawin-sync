@@ -85,7 +85,8 @@ $desdeCodigo = $opciones['desde-codigo'] ?? null;
 
 $whereAño = "";
 if ($año) {
-    $whereAño = "AND YEAR(oh.ZFECHA) = {$año}";
+    // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
+    $whereAño = "AND oh.ZCONTA = '{$año}'";
 } elseif (!$todos) {
     // Por defecto, últimos 2 años
     $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
