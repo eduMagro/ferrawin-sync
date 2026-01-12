@@ -1,0 +1,24 @@
+# Vendor
+/vendor/
+
+# Environment
+.env
+
+# Logs
+/logs/*.log
+
+# Control files
+sync.pid
+sync.pause
+run-sync.bat
+run-sync.vbs
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
