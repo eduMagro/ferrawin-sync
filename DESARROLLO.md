@@ -1,5 +1,7 @@
 # FerraWin Sync - Documentación de Desarrollo
 
+> **Para uso general y comandos, ver [README.md](README.md)**
+
 ## Resumen del Sistema
 
 Sistema de sincronización entre FerraWin (software de gestión de ferralla) y el Manager (aplicación web Laravel). Extrae datos de planillas, elementos y entidades/ensamblajes desde FerraWin y los envía al Manager vía API.
@@ -9,14 +11,34 @@ Sistema de sincronización entre FerraWin (software de gestión de ferralla) y e
 ## Arquitectura
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│    FerraWin     │────▶│  FerrawinSync   │────▶│     Manager     │
-│   (SQL Server)  │     │   (PHP Script)  │     │    (Laravel)    │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-     ORD_HEAD                sync.php              API REST
-     ORD_BAR                 src/                  /api/ferrawin/*
-     ORD_DET
-     PROD_DETO
+┌─────────────────────────────────────────────────────────────────┐
+│                     RED LOCAL (Oficina)                         │
+│                                                                 │
+│   ┌─────────────────┐       ┌─────────────────────┐            │
+│   │    FerraWin     │       │   ferrawin-sync     │            │
+│   │   SQL Server    │◄──────│   (Script PHP)      │            │
+│   │  192.168.0.7    │       │                     │            │
+│   │                 │       │  sync-optimizado.php│            │
+│   │   ORD_HEAD      │       │  src/               │            │
+│   │   ORD_BAR       │       │                     │            │
+│   │   ORD_DET       │       └──────────┬──────────┘            │
+│   │   PROD_DETO     │                  │                        │
+│   │   PROJECT       │                  │                        │
+│   └─────────────────┘                  │                        │
+│                                        │                        │
+└────────────────────────────────────────┼────────────────────────┘
+                                         │
+                                         │ HTTPS POST
+                                         │ /api/ferrawin/sync
+                                         ▼
+                            ┌─────────────────────────┐
+                            │  Servidor Producción    │
+                            │ app.hierrospacoreyes.es │
+                            │       (Laravel)         │
+                            │                         │
+                            │  FerrawinBulkImport     │
+                            │  Service                │
+                            └─────────────────────────┘
 ```
 
 ---
@@ -61,15 +83,20 @@ Sistema de sincronización entre FerraWin (software de gestión de ferralla) y e
 
 ```
 ferrawin-sync/
+├── sync-optimizado.php    # Script principal (RECOMENDADO)
+├── sync.php               # Script antiguo (más opciones)
+├── test-connection.php    # Verificar conexiones
+├── check_datos.php        # Debug de planilla específica
 ├── src/
 │   ├── ApiClient.php      # Cliente HTTP para Manager API
-│   ├── Config.php         # Configuración desde .env
+│   ├── Config.php         # Configuración desde .env (multi-target)
 │   ├── Database.php       # Conexión SQL Server
 │   ├── FerrawinQuery.php  # Queries a FerraWin (principal)
 │   └── Logger.php         # Logging con Monolog
-├── logs/                  # Logs de sincronización
-├── sync.php               # Script principal
-├── .env                   # Configuración
+├── logs/                  # Logs diarios (sync-YYYY-MM-DD.log)
+├── .env                   # Configuración (credenciales, URLs)
+├── README.md              # Documentación de uso
+├── DESARROLLO.md          # Documentación técnica (este archivo)
 └── composer.json
 ```
 
@@ -303,28 +330,43 @@ POST /etiquetas-ensamblaje/{etiqueta}/marcar-impresa
 
 ## Comandos Útiles
 
+> **Ver [README.md](README.md) para documentación completa de comandos**
+
 ```bash
-# Sincronizar últimos 7 días
-php sync.php
+# SCRIPT RECOMENDADO: sync-optimizado.php
 
-# Sincronizar año completo
-php sync.php --año=2024
+# Sincronizar año 2025 a producción
+php sync-optimizado.php --año 2025 --target production
 
-# Sincronizar planilla específica
-php sync.php --codigo=01-2024001
+# Sincronizar año 2025 a local
+php sync-optimizado.php --año 2025 --target local
 
-# Ver estadísticas
+# Continuar desde planilla específica
+php sync-optimizado.php --año 2025 --desde-codigo 2025-007500 --target production
+
+# Probar con 10 planillas
+php sync-optimizado.php --test 10 --target local
+
+# SCRIPT ANTIGUO: sync.php (para estadísticas)
+
+# Ver estadísticas de FerraWin
 php sync.php --stats
+
+# Sincronizar por rango de fechas
+php sync.php --desde 2024-01-01 --hasta 2024-06-30
 ```
 
 ---
 
 ## Última Actualización
-**Fecha:** 2024-12-29
+**Fecha:** 2026-01-12
 
 **Cambios recientes:**
+- Nuevo script `sync-optimizado.php` con envío en batches
+- Soporte multi-target (local/production) en Config.php
+- Filtro por ZCONTA (año contable) en lugar de YEAR(ZFECHA)
+- Sistema de pausa/reanudación con archivos de control
+- Documentación actualizada (README.md + DESARROLLO.md)
 - Sistema de etiquetas de ensamblaje con gráfico SVG
 - Importación de entidades desde ORD_DET
 - Cálculo de distribución (armadura longitudinal/transversal)
-- Componente visual con sección + vista lateral
-- Estrategia de subetiquetas configurable
