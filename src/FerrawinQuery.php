@@ -189,6 +189,7 @@ class FerrawinQuery
                 oh.ZFECHA as fecha,
                 oh.ZNOMBRE as descripcion_planilla,
                 ob.ZCODLIN as fila,
+                ob.ZELEMENTO as zelemento,
                 od.ZSITUACION as descripcion_fila,
                 ob.ZMARCA as marca,
                 ob.ZDIAMETRO as diametro,
@@ -260,6 +261,11 @@ class FerrawinQuery
 
         $elementos = [];
         foreach ($datos as $row) {
+            // Construir ferrawin_id único: "{fila}-{zelemento}"
+            $fila = $row->fila ?? '';
+            $zelemento = $row->zelemento ?? '';
+            $ferrawinId = trim($fila) . '-' . trim($zelemento);
+
             $elementos[] = [
                 'codigo_cliente' => $row->codigo_cliente ?? '',
                 'nombre_cliente' => $row->nombre_cliente ?? '',
@@ -268,7 +274,9 @@ class FerrawinQuery
                 'ensamblado' => $row->ensamblado ?? '',
                 'seccion' => $row->seccion ?? '',
                 'descripcion_planilla' => $row->descripcion_planilla ?? '',
-                'fila' => $row->fila ?? '',
+                'fila' => $fila,
+                'zelemento' => $zelemento,
+                'ferrawin_id' => $ferrawinId,
                 'descripcion_fila' => $row->descripcion_fila ?? '',
                 'marca' => $row->marca ?? '',
                 'diametro' => (int)($row->diametro ?? 0),
