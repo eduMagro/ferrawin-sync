@@ -191,11 +191,13 @@ if ($total === 0) {
 $procesadas = 0;
 $errores = 0;
 $vacias = 0;
-$batchSize = 5; // Reducido de 10 para evitar timeouts con planillas grandes
+$maxPlanillasPorBatch = 5;    // Máximo planillas por batch
+$maxElementosPorBatch = 200;  // Máximo elementos por batch (evita timeouts)
 $batch = [];
-$batchesFallidos = []; // Cola de batches fallidos para reintentar al final
-$maxReintentos = 3;    // Reintentos inmediatos por batch
-$delayBase = 5;        // Segundos base para backoff exponencial
+$batchElementos = 0;          // Contador de elementos en el batch actual
+$batchesFallidos = [];        // Cola de batches fallidos para reintentar al final
+$maxReintentos = 3;           // Reintentos inmediatos por batch
+$delayBase = 5;               // Segundos base para backoff exponencial
 
 foreach ($codigos as $i => $codigo) {
     // Verificar si se solicitó pausar
@@ -239,10 +241,13 @@ foreach ($codigos as $i => $codigo) {
         }
 
         $batch[] = $planilla;
+        $batchElementos += $numElementos;
 
-        // Enviar batch cuando está lleno
-        if (count($batch) >= $batchSize) {
-            Logger::info("Enviando batch de " . count($batch) . " planillas...");
+        // Enviar batch cuando alcanza límite de planillas O elementos
+        $debEnviar = count($batch) >= $maxPlanillasPorBatch || $batchElementos >= $maxElementosPorBatch;
+
+        if ($debEnviar) {
+            Logger::info("Enviando batch de " . count($batch) . " planillas ({$batchElementos} elementos)...");
             $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
 
             if ($resultado['success'] ?? false) {
@@ -259,6 +264,7 @@ foreach ($codigos as $i => $codigo) {
                 ];
             }
             $batch = [];
+            $batchElementos = 0;
         }
 
     } catch (Exception $e) {
@@ -269,7 +275,7 @@ foreach ($codigos as $i => $codigo) {
 
 // Enviar último batch si queda algo
 if (!empty($batch)) {
-    Logger::info("Enviando batch final de " . count($batch) . " planillas...");
+    Logger::info("Enviando batch final de " . count($batch) . " planillas ({$batchElementos} elementos)...");
     $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
 
     if ($resultado['success'] ?? false) {
