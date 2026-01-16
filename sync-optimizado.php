@@ -3,11 +3,14 @@
  * Sincronización optimizada - Solo procesa planillas CON DATOS
  *
  * Uso:
- *   php sync-optimizado.php --año 2024 --target local
- *   php sync-optimizado.php --año 2024 --target production
- *   php sync-optimizado.php --test 10 --target local
- *   php sync-optimizado.php --todos --target production
- *   php sync-optimizado.php --año 2025 --desde-codigo 2025-007816 --target local
+ *   php sync-optimizado.php --anio=2024 --target=local         # Sincronizar año específico
+ *   php sync-optimizado.php --anio=2024 --target=production    # Sincronizar a producción
+ *   php sync-optimizado.php --todos --target=production        # Sincronizar TODAS las planillas
+ *   php sync-optimizado.php --nuevas --target=production       # Solo planillas NUEVAS (no sincronizadas)
+ *   php sync-optimizado.php --test=10 --target=local           # Test con límite
+ *   php sync-optimizado.php --anio=2025 --desde-codigo=2025-007816 --target=local  # Continuar desde código
+ *
+ * Nota: Se usa --anio en vez de --año para evitar problemas de encoding en Windows.
  */
 
 require 'vendor/autoload.php';
@@ -50,7 +53,7 @@ guardarPid();
 
 Config::load();
 
-$opciones = getopt('', ['año::', 'test::', 'todos', 'dry-run', 'desde-codigo::', 'target::']);
+$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'dry-run', 'desde-codigo::', 'target::']);
 
 // Configurar target (local o production)
 $target = $opciones['target'] ?? 'local';
@@ -77,9 +80,10 @@ try {
 }
 
 // Obtener planillas CON DATOS (INNER JOIN con ORD_BAR)
-$año = $opciones['año'] ?? null;
+$año = $opciones['anio'] ?? null;
 $limite = isset($opciones['test']) ? (int)$opciones['test'] : null;
 $todos = isset($opciones['todos']);
+$nuevas = isset($opciones['nuevas']);
 $dryRun = isset($opciones['dry-run']);
 $desdeCodigo = $opciones['desde-codigo'] ?? null;
 
@@ -87,8 +91,8 @@ $whereAño = "";
 if ($año) {
     // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
     $whereAño = "AND oh.ZCONTA = '{$año}'";
-} elseif (!$todos) {
-    // Por defecto, últimos 2 años
+} elseif (!$todos && !$nuevas) {
+    // Por defecto, últimos 2 años (excepto si es --todos o --nuevas)
     $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
 }
 
@@ -100,20 +104,63 @@ if ($desdeCodigo) {
     Logger::info("Continuando desde código: {$desdeCodigo}");
 }
 
+// Construir WHERE dinámicamente
+$whereClauses = [];
+if ($whereAño) {
+    $whereClauses[] = ltrim($whereAño, 'AND ');
+}
+if ($whereDesdeCodigo) {
+    $whereClauses[] = ltrim($whereDesdeCodigo, 'AND ');
+}
+$whereSQL = count($whereClauses) > 0 ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
+
 $sql = "
     SELECT DISTINCT
         oh.ZCONTA + '-' + oh.ZCODIGO as codigo
     FROM ORD_HEAD oh
-    WHERE oh.ZTIPOORD = 'P' {$whereAño} {$whereDesdeCodigo}
+    {$whereSQL}
     ORDER BY codigo DESC
 ";
 
-Logger::info("Buscando planillas...", ['año' => $año ?: 'todos', 'limite' => $limite ?: 'sin límite']);
+$modo = $nuevas ? 'nuevas' : ($año ?: 'todos');
+Logger::info("Buscando planillas...", ['modo' => $modo, 'limite' => $limite ?: 'sin límite']);
+Logger::info("Ejecutando consulta SQL...");
 
-$stmt = $pdo->query($sql);
-$codigos = [];
-while ($row = $stmt->fetch()) {
-    $codigos[] = $row->codigo;
+try {
+    $stmt = $pdo->query($sql);
+    $codigos = [];
+    while ($row = $stmt->fetch()) {
+        $codigos[] = $row->codigo;
+    }
+    Logger::info("Consulta SQL completada");
+} catch (Exception $e) {
+    Logger::error("Error en consulta SQL: " . $e->getMessage());
+    exit(1);
+}
+
+$totalFerrawin = count($codigos);
+Logger::info("Encontradas {$totalFerrawin} planillas en FerraWin");
+
+// Si es modo "nuevas", filtrar las que ya existen en destino
+if ($nuevas) {
+    Logger::info("Obteniendo códigos existentes en {$target}...");
+    try {
+        $codigosExistentes = $apiClient->getCodigosExistentes();
+        $totalExistentes = count($codigosExistentes);
+        Logger::info("Planillas ya sincronizadas: {$totalExistentes}");
+
+        // Filtrar solo las nuevas
+        Logger::info("Filtrando planillas nuevas...");
+        $codigosExistentesSet = array_flip($codigosExistentes);
+        $codigos = array_filter($codigos, fn($c) => !isset($codigosExistentesSet[$c]));
+        $codigos = array_values($codigos); // Re-indexar
+
+        $nuevasPlanillas = count($codigos);
+        Logger::info("Planillas nuevas a sincronizar: {$nuevasPlanillas}");
+    } catch (Exception $e) {
+        Logger::error("Error obteniendo códigos existentes: " . $e->getMessage());
+        exit(1);
+    }
 }
 
 // Aplicar límite si es test
@@ -122,7 +169,7 @@ if ($limite && count($codigos) > $limite) {
 }
 
 $total = count($codigos);
-Logger::info("Encontradas {$total} planillas");
+Logger::info("Planillas a procesar: {$total}");
 
 if ($dryRun) {
     echo "\n[DRY-RUN] Planillas que se sincronizarían: {$total}\n";
@@ -144,15 +191,18 @@ if ($total === 0) {
 $procesadas = 0;
 $errores = 0;
 $vacias = 0;
-$batchSize = 10;
+$batchSize = 5; // Reducido de 10 para evitar timeouts con planillas grandes
 $batch = [];
+$batchesFallidos = []; // Cola de batches fallidos para reintentar al final
+$maxReintentos = 3;    // Reintentos inmediatos por batch
+$delayBase = 5;        // Segundos base para backoff exponencial
 
 foreach ($codigos as $i => $codigo) {
     // Verificar si se solicitó pausar
     if (debePausar()) {
         $añoPlanilla = substr($codigo, 0, 4);
         Logger::info("⏸️ PAUSADO por el usuario en planilla: {$codigo}");
-        Logger::info("Para continuar: php sync-optimizado.php --año {$añoPlanilla} --desde-codigo {$codigo}");
+        Logger::info("Para continuar: php sync-optimizado.php --anio {$añoPlanilla} --desde-codigo {$codigo}");
 
         // Si hay un batch pendiente, enviarlo antes de pausar
         if (!empty($batch)) {
@@ -193,15 +243,20 @@ foreach ($codigos as $i => $codigo) {
         // Enviar batch cuando está lleno
         if (count($batch) >= $batchSize) {
             Logger::info("Enviando batch de " . count($batch) . " planillas...");
-            $resultado = $apiClient->enviarPlanillas($batch);
+            $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
 
             if ($resultado['success'] ?? false) {
                 $procesadas += count($batch);
                 Logger::info("Batch OK: " . count($batch) . " planillas");
             } else {
                 $error = $resultado['error'] ?? 'Error desconocido';
-                Logger::error("Error en batch: {$error}");
-                $errores += count($batch);
+                Logger::error("Error en batch (guardado para reintento final): {$error}");
+                // Guardar batch fallido para reintentar al final
+                $batchesFallidos[] = [
+                    'planillas' => $batch,
+                    'error' => $error,
+                    'codigos' => array_column($batch, 'codigo'),
+                ];
             }
             $batch = [];
         }
@@ -215,31 +270,104 @@ foreach ($codigos as $i => $codigo) {
 // Enviar último batch si queda algo
 if (!empty($batch)) {
     Logger::info("Enviando batch final de " . count($batch) . " planillas...");
-    $resultado = $apiClient->enviarPlanillas($batch);
+    $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
 
     if ($resultado['success'] ?? false) {
         $procesadas += count($batch);
         Logger::info("Batch final OK");
     } else {
         $error = $resultado['error'] ?? 'Error desconocido';
-        Logger::error("Error en batch final: {$error}");
-        $errores += count($batch);
+        Logger::error("Error en batch final (guardado para reintento): {$error}");
+        $batchesFallidos[] = [
+            'planillas' => $batch,
+            'error' => $error,
+            'codigos' => array_column($batch, 'codigo'),
+        ];
     }
 }
+
+// === PASADA FINAL: Reintentar batches fallidos ===
+if (!empty($batchesFallidos)) {
+    $totalFallidos = count($batchesFallidos);
+    $planillasFallidas = array_sum(array_map(fn($b) => count($b['planillas']), $batchesFallidos));
+
+    Logger::info("=== PASADA FINAL: Reintentando {$totalFallidos} batches fallidos ({$planillasFallidas} planillas) ===");
+
+    // Esperar un poco antes de reintentar (el servidor puede haberse recuperado)
+    Logger::info("Esperando 30 segundos antes de reintentar...");
+    sleep(30);
+
+    $recuperados = 0;
+    $fallidosDefinitivos = [];
+
+    foreach ($batchesFallidos as $idx => $batchFallido) {
+        $numBatch = $idx + 1;
+        $codigosBatch = implode(', ', array_slice($batchFallido['codigos'], 0, 3));
+        if (count($batchFallido['codigos']) > 3) {
+            $codigosBatch .= '...';
+        }
+
+        Logger::info("[Reintento final {$numBatch}/{$totalFallidos}] Batch: {$codigosBatch}");
+
+        // Reintentar con más paciencia (más reintentos, más delay)
+        $resultado = $apiClient->enviarPlanillasConRetry(
+            $batchFallido['planillas'],
+            $maxReintentos + 2,  // 2 reintentos extra
+            $delayBase * 2       // Doble delay base
+        );
+
+        if ($resultado['success'] ?? false) {
+            $recuperados += count($batchFallido['planillas']);
+            $procesadas += count($batchFallido['planillas']);
+            Logger::info("Batch recuperado exitosamente");
+        } else {
+            $errores += count($batchFallido['planillas']);
+            $fallidosDefinitivos[] = $batchFallido['codigos'];
+            Logger::error("Batch fallido definitivamente", [
+                'codigos' => $batchFallido['codigos'],
+            ]);
+        }
+    }
+
+    if ($recuperados > 0) {
+        Logger::info("Recuperadas {$recuperados} planillas en pasada final");
+    }
+
+    if (!empty($fallidosDefinitivos)) {
+        Logger::error("=== PLANILLAS NO SINCRONIZADAS ===");
+        foreach ($fallidosDefinitivos as $codigos) {
+            Logger::error("  - " . implode(', ', $codigos));
+        }
+    }
+}
+
+$recuperadosFinal = $recuperados ?? 0;
 
 Logger::info("=== Sincronización completada ===", [
     'total' => $total,
     'procesadas' => $procesadas,
     'vacias' => $vacias,
     'errores' => $errores,
+    'recuperados_pasada_final' => $recuperadosFinal,
 ]);
 
 echo "\n";
 echo "=================================\n";
 echo "RESUMEN\n";
 echo "=================================\n";
-echo "Total planillas: {$total}\n";
-echo "Procesadas OK:   {$procesadas}\n";
-echo "Vacías:          {$vacias}\n";
-echo "Errores:         {$errores}\n";
+echo "Total planillas:   {$total}\n";
+echo "Procesadas OK:     {$procesadas}\n";
+if ($recuperadosFinal > 0) {
+    echo "  (recuperadas):   {$recuperadosFinal}\n";
+}
+echo "Vacías:            {$vacias}\n";
+echo "Errores:           {$errores}\n";
 echo "=================================\n";
+
+if (!empty($fallidosDefinitivos ?? [])) {
+    echo "\n⚠️  PLANILLAS NO SINCRONIZADAS:\n";
+    foreach ($fallidosDefinitivos as $codigos) {
+        echo "   - " . implode(', ', $codigos) . "\n";
+    }
+    echo "\n";
+}
