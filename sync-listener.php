@@ -18,6 +18,7 @@ require __DIR__ . '/vendor/autoload.php';
 
 use Ratchet\Client\Connector;
 use React\EventLoop\Factory as LoopFactory;
+use Pusher\Pusher;
 
 // Cargar configuración desde .env
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
@@ -36,6 +37,13 @@ $pusherConfig = [
     'key' => $_ENV['PUSHER_APP_KEY'] ?? '',
     'secret' => $_ENV['PUSHER_APP_SECRET'] ?? '',
     'cluster' => $_ENV['PUSHER_APP_CLUSTER'] ?? 'eu',
+];
+
+// Configuración API para enviar estados a producción
+// Usa PRODUCTION_URL y PRODUCTION_TOKEN ya existentes, o variables específicas si se definen
+$apiConfig = [
+    'base_url' => $_ENV['API_BASE_URL'] ?? $_ENV['PRODUCTION_URL'] ?? 'https://app.hierrospacoreyes.es',
+    'token' => $_ENV['API_STATUS_TOKEN'] ?? $_ENV['PRODUCTION_TOKEN'] ?? '',
 ];
 
 // Validar configuración
@@ -76,28 +84,100 @@ function saveStatus(array $status): void
 }
 
 /**
+ * Crea instancia de Pusher para enviar eventos
+ */
+function getPusher(): Pusher
+{
+    global $pusherConfig;
+    return new Pusher(
+        $pusherConfig['key'],
+        $pusherConfig['secret'],
+        $pusherConfig['app_id'],
+        ['cluster' => $pusherConfig['cluster'], 'useTLS' => true]
+    );
+}
+
+/**
+ * Envía estado de sincronización a producción via API HTTP
+ */
+function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null): void
+{
+    global $apiConfig;
+
+    try {
+        $data = [
+            'status' => $status,
+            'progress' => $progress,
+            'message' => $message,
+            'year' => $year,
+            'target' => 'production',
+            'last_planilla' => $lastPlanilla,
+        ];
+
+        // Enviar via API HTTP
+        $url = rtrim($apiConfig['base_url'], '/') . '/api/ferrawin/sync-status';
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => json_encode($data),
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $apiConfig['token'],
+                'Accept: application/json',
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($httpCode >= 200 && $httpCode < 300) {
+            logMessage("Estado enviado via API: {$status}" . ($progress ? " ({$progress})" : ""));
+        } else {
+            logMessage("Error API ({$httpCode}): {$response} - {$error}", 'WARNING');
+        }
+    } catch (\Exception $e) {
+        logMessage("Error enviando estado: " . $e->getMessage(), 'ERROR');
+    }
+}
+
+/**
  * Ejecuta la sincronización con los parámetros especificados
  */
 function ejecutarSync(array $params, bool $testMode): void
 {
+    global $syncYear;
+
     $año = $params['año'] ?? null;
     $target = $params['target'] ?? 'local';
     $desdeCodigo = $params['desde_codigo'] ?? null;
 
     if (!$año) {
         logMessage("Error: Falta parámetro 'año' en el comando", 'ERROR');
+        enviarEstado('error', null, 'Falta parámetro año');
         return;
     }
+
+    $syncYear = $año;
 
     // Construir argumentos
     if ($año === 'todos') {
         $args = "--todos --target={$target}";
+        $mensaje = "Sincronización completa iniciada";
     } elseif ($año === 'nuevas') {
         $args = "--nuevas --target={$target}";
+        $mensaje = "Sincronización de nuevas iniciada";
     } else {
         $args = "--anio={$año} --target={$target}";
+        $mensaje = "Sincronización {$año} iniciada";
         if ($desdeCodigo) {
             $args .= " --desde-codigo={$desdeCodigo}";
+            $mensaje .= " desde {$desdeCodigo}";
         }
     }
 
@@ -105,6 +185,7 @@ function ejecutarSync(array $params, bool $testMode): void
 
     if ($testMode) {
         logMessage("[MODO TEST] Se ejecutaría: php sync-optimizado.php {$args}");
+        enviarEstado('test', null, "Modo test: {$args}");
         return;
     }
 
@@ -112,6 +193,9 @@ function ejecutarSync(array $params, bool $testMode): void
     if (file_exists(PAUSE_FILE)) {
         unlink(PAUSE_FILE);
     }
+
+    // Enviar estado "iniciando"
+    enviarEstado('running', '0/?', $mensaje, $año);
 
     // Ejecutar en background usando VBScript (sin ventana visible)
     $phpPath = 'C:\\xampp\\php\\php.exe';
@@ -133,6 +217,7 @@ function ejecutarSync(array $params, bool $testMode): void
         ]);
     } else {
         logMessage("Error al iniciar sincronización (código: {$returnCode})", 'ERROR');
+        enviarEstado('error', null, "Error al iniciar (código: {$returnCode})");
     }
 }
 
@@ -263,7 +348,9 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
             $conn->on('message', function($msg) use ($conn, $pusherConfig, $testMode) {
                 global $socketId;
 
-                $data = json_decode($msg, true);
+                // Convertir mensaje a string si es un objeto Message
+                $msgString = is_string($msg) ? $msg : (string)$msg;
+                $data = json_decode($msgString, true);
                 $event = $data['event'] ?? '';
 
                 switch ($event) {
@@ -355,6 +442,85 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
 // Iniciar conexión
 $connect();
+
+// Variable global para tracking
+$syncYear = null;
+$lastProgress = null;
+$lastSyncCheck = 0;
+
+// Monitor de sincronización cada 10 segundos
+$loop->addPeriodicTimer(10, function() use ($testMode) {
+    global $syncYear, $lastProgress, $lastSyncCheck;
+
+    $pidFile = BASE_DIR . '/sync.pid';
+    $logFile = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+
+    // Verificar si hay una sincronización en curso
+    if (file_exists($pidFile)) {
+        $pid = (int) trim(file_get_contents($pidFile));
+
+        // Verificar si el proceso existe
+        exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
+        $isRunning = false;
+        foreach ($output as $line) {
+            if (strpos($line, (string)$pid) !== false) {
+                $isRunning = true;
+                break;
+            }
+        }
+
+        if ($isRunning && file_exists($logFile)) {
+            // Leer últimas líneas del log para obtener progreso
+            $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            $lines = array_slice($lines, -50); // Últimas 50 líneas
+
+            $progress = null;
+            $lastPlanilla = null;
+
+            foreach (array_reverse($lines) as $line) {
+                if (preg_match('/\[(\d+)\/(\d+)\]/', $line, $matches)) {
+                    $progress = "{$matches[1]}/{$matches[2]}";
+                }
+                if (!$lastPlanilla && preg_match('/Preparando (\d{4}-\d+)/', $line, $planillaMatch)) {
+                    $lastPlanilla = $planillaMatch[1];
+                }
+                if ($progress && $lastPlanilla) {
+                    break;
+                }
+            }
+
+            // Solo enviar si el progreso cambió
+            if ($progress && $progress !== $lastProgress) {
+                $lastProgress = $progress;
+                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla);
+            }
+        } elseif (!$isRunning) {
+            // Proceso terminó - verificar si fue exitoso o con error
+            if (file_exists($logFile)) {
+                $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                $lastLine = end($lines);
+
+                if (strpos($lastLine, 'completada') !== false || strpos($lastLine, 'finalizada') !== false) {
+                    enviarEstado('completed', $lastProgress, 'Sincronización completada', $syncYear);
+                } elseif (strpos($lastLine, 'pausada') !== false || strpos($lastLine, 'pausa') !== false) {
+                    enviarEstado('paused', $lastProgress, 'Sincronización pausada', $syncYear);
+                } else {
+                    enviarEstado('completed', $lastProgress, 'Sincronización finalizada', $syncYear);
+                }
+            }
+            $lastProgress = null;
+            $syncYear = null;
+        }
+    } else {
+        // No hay sincronización en curso
+        if ($lastProgress !== null) {
+            // Acabó de terminar
+            enviarEstado('idle', null, 'Sin sincronización activa');
+            $lastProgress = null;
+            $syncYear = null;
+        }
+    }
+});
 
 // Heartbeat cada 30 segundos para mantener el estado actualizado
 $loop->addPeriodicTimer(30, function() use ($testMode) {
