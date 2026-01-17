@@ -26,6 +26,52 @@ define('PID_FILE', __DIR__ . '/sync.pid');
 define('PAUSE_FILE', __DIR__ . '/sync.pause');
 
 /**
+ * Verifica si un proceso con el PID dado está corriendo.
+ */
+function procesoExiste(int $pid): bool {
+    if (PHP_OS_FAMILY === 'Windows') {
+        exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
+        foreach ($output as $line) {
+            if (strpos($line, (string)$pid) !== false) {
+                return true;
+            }
+        }
+        return false;
+    } else {
+        return file_exists("/proc/{$pid}");
+    }
+}
+
+/**
+ * Limpia archivos de control huérfanos (de ejecuciones anteriores que no terminaron bien).
+ */
+function limpiarArchivosHuerfanos(): void {
+    // Verificar si hay un PID guardado de un proceso que ya no existe
+    if (file_exists(PID_FILE)) {
+        $pidGuardado = (int) trim(file_get_contents(PID_FILE));
+        if ($pidGuardado > 0 && !procesoExiste($pidGuardado)) {
+            unlink(PID_FILE);
+            // Si el proceso no existe, también limpiamos el archivo de pausa
+            if (file_exists(PAUSE_FILE)) {
+                unlink(PAUSE_FILE);
+            }
+        } elseif ($pidGuardado > 0 && procesoExiste($pidGuardado)) {
+            // Ya hay una sincronización corriendo
+            echo "ERROR: Ya hay una sincronización en ejecución (PID: {$pidGuardado})\n";
+            exit(1);
+        }
+    }
+
+    // Limpiar archivo de pausa huérfano (más de 1 hora sin proceso activo)
+    if (file_exists(PAUSE_FILE) && !file_exists(PID_FILE)) {
+        $pauseTime = filemtime(PAUSE_FILE);
+        if (time() - $pauseTime > 3600) {
+            unlink(PAUSE_FILE);
+        }
+    }
+}
+
+/**
  * Guarda el PID del proceso actual.
  */
 function guardarPid(): void {
@@ -46,6 +92,9 @@ function limpiarPid(): void {
 function debePausar(): bool {
     return file_exists(PAUSE_FILE);
 }
+
+// Limpiar archivos huérfanos antes de iniciar
+limpiarArchivosHuerfanos();
 
 // Registrar limpieza al terminar y guardar PID
 register_shutdown_function('limpiarPid');
