@@ -124,6 +124,66 @@ class FerrawinQuery
     }
 
     /**
+     * Obtiene el conteo de elementos, peso total y checksum de dimensiones por planilla.
+     *
+     * @param array $codigos Lista de códigos de planilla
+     * @return array Mapa de código => ['elementos' => int, 'peso' => float, 'checksum' => int]
+     */
+    public static function getConteoElementos(array $codigos): array
+    {
+        if (empty($codigos)) {
+            return [];
+        }
+
+        $pdo = Database::getConnection();
+
+        // Separar códigos en zconta y zcodigo
+        $params = [];
+        $conditions = [];
+        foreach ($codigos as $i => $codigo) {
+            $partes = explode('-', $codigo, 2);
+            if (count($partes) === 2) {
+                $conditions[] = "(ob.ZCONTA = ? AND ob.ZCODIGO = ?)";
+                $params[] = $partes[0];
+                $params[] = $partes[1];
+            }
+        }
+
+        if (empty($conditions)) {
+            return [];
+        }
+
+        $whereSQL = implode(' OR ', $conditions);
+
+        // STRING_AGG disponible en SQL Server 2017+
+        // Si no funciona, usar FOR XML PATH como fallback
+        $sql = "
+            SELECT
+                ob.ZCONTA + '-' + ob.ZCODIGO as codigo,
+                COUNT(*) as total_elementos,
+                ROUND(SUM(CAST(ob.ZPESOTESTD AS FLOAT)), 2) as peso_total,
+                STRING_AGG(ISNULL(CAST(ob.ZFIGURA AS NVARCHAR(MAX)), ''), '|') WITHIN GROUP (ORDER BY ob.ZCODLIN, ob.ZELEMENTO) as dims_concat
+            FROM ORD_BAR ob
+            WHERE {$whereSQL}
+            GROUP BY ob.ZCONTA, ob.ZCODIGO
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+
+        $resultado = [];
+        while ($row = $stmt->fetch()) {
+            $resultado[$row->codigo] = [
+                'elementos' => (int)$row->total_elementos,
+                'peso' => round((float)$row->peso_total, 2),
+                'checksum' => crc32($row->dims_concat ?? ''),
+            ];
+        }
+
+        return $resultado;
+    }
+
+    /**
      * Obtiene solo la cabecera de una planilla (sin elementos).
      */
     public static function getCabeceraPlanilla(string $codigo): ?object
@@ -508,7 +568,10 @@ class FerrawinQuery
 
         $pdo = Database::getConnection();
 
-        // Obtener las entidades (líneas de ORD_DET) con COTAS de PROD_DETI
+        // Obtener las entidades (líneas de ORD_DET) con COTAS de PROD_DETI.
+        // NOTA: PROD_DETI puede tener múltiples filas por ZCODLIN (una por unidad
+        // de producción), así que usamos un subquery con ROW_NUMBER para tomar
+        // solo la primera fila y evitar multiplicar las entidades.
         $sqlEntidades = "
             SELECT
                 od.ZCODLIN,
@@ -523,9 +586,14 @@ class FerrawinQuery
                 di.ZCOTAS as cotas,
                 di.ZLONGITUD as longitud_ensamblaje
             FROM ORD_DET od
-            LEFT JOIN PROD_DETI di ON od.ZCONTA = di.ZCONTA
+            LEFT JOIN (
+                SELECT ZCONTA, ZCODPLA, ZCODLIN, ZCOTAS, ZLONGITUD,
+                       ROW_NUMBER() OVER (PARTITION BY ZCONTA, ZCODPLA, ZCODLIN ORDER BY (SELECT NULL)) as rn
+                FROM PROD_DETI
+            ) di ON od.ZCONTA = di.ZCONTA
                 AND od.ZCODIGO = di.ZCODPLA
                 AND od.ZCODLIN = di.ZCODLIN
+                AND di.rn = 1
             WHERE od.ZCONTA = :zconta AND od.ZCODIGO = :zcodigo
             ORDER BY od.ZCODLIN
         ";
