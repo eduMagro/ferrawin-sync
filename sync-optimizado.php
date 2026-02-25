@@ -7,6 +7,7 @@
  *   php sync-optimizado.php --anio=2024 --target=production    # Sincronizar a producción
  *   php sync-optimizado.php --todos --target=production        # Sincronizar TODAS las planillas
  *   php sync-optimizado.php --nuevas --target=production       # Solo planillas NUEVAS (no sincronizadas)
+ *   php sync-optimizado.php --codigo=2026-000886 --target=local # Sincronizar UNA planilla específica
  *   php sync-optimizado.php --test=10 --target=local           # Test con límite
  *   php sync-optimizado.php --anio=2025 --desde-codigo=2025-007816 --target=local  # Continuar desde código
  *
@@ -20,6 +21,8 @@ use FerrawinSync\Database;
 use FerrawinSync\FerrawinQuery;
 use FerrawinSync\ApiClient;
 use FerrawinSync\Logger;
+
+$inicioGlobal = microtime(true);
 
 // Archivos de control para pausa
 define('PID_FILE', __DIR__ . '/sync.pid');
@@ -102,7 +105,7 @@ guardarPid();
 
 Config::load();
 
-$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'dry-run', 'desde-codigo::', 'target::']);
+$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
 
 // Configurar target (local o production)
 $target = $opciones['target'] ?? 'local';
@@ -135,77 +138,129 @@ $todos = isset($opciones['todos']);
 $nuevas = isset($opciones['nuevas']);
 $dryRun = isset($opciones['dry-run']);
 $desdeCodigo = $opciones['desde-codigo'] ?? null;
+$codigoEspecifico = $opciones['codigo'] ?? null;
+$rebuild = isset($opciones['rebuild']);
+$syncMetadata = ['modo' => $rebuild ? 'rebuild' : 'incremental'];
 
-$whereAño = "";
-if ($año) {
-    // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
-    $whereAño = "AND oh.ZCONTA = '{$año}'";
-} elseif (!$todos && !$nuevas) {
-    // Por defecto, últimos 2 años (excepto si es --todos o --nuevas)
-    $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
-}
-
-// Filtro para continuar desde un código específico
-$whereDesdeCodigo = "";
-if ($desdeCodigo) {
-    $desdeCodigo = str_replace("'", "''", $desdeCodigo); // Escapar
-    $whereDesdeCodigo = "AND (oh.ZCONTA + '-' + oh.ZCODIGO) <= '{$desdeCodigo}'";
-    Logger::info("Continuando desde código: {$desdeCodigo}");
-}
-
-// Construir WHERE dinámicamente
-$whereClauses = [];
-if ($whereAño) {
-    $whereClauses[] = ltrim($whereAño, 'AND ');
-}
-if ($whereDesdeCodigo) {
-    $whereClauses[] = ltrim($whereDesdeCodigo, 'AND ');
-}
-$whereSQL = count($whereClauses) > 0 ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
-
-$sql = "
-    SELECT DISTINCT
-        oh.ZCONTA + '-' + oh.ZCODIGO as codigo
-    FROM ORD_HEAD oh
-    {$whereSQL}
-    ORDER BY codigo DESC
-";
-
-$modo = $nuevas ? 'nuevas' : ($año ?: 'todos');
-Logger::info("Buscando planillas...", ['modo' => $modo, 'limite' => $limite ?: 'sin límite']);
-Logger::info("Ejecutando consulta SQL...");
-
-try {
-    $stmt = $pdo->query($sql);
-    $codigos = [];
-    while ($row = $stmt->fetch()) {
-        $codigos[] = $row->codigo;
+// Si se especifica un código específico, solo sincronizar esa planilla
+if ($codigoEspecifico) {
+    Logger::info("=== Sincronizando planilla específica: {$codigoEspecifico} ===");
+    $codigos = [$codigoEspecifico];
+    $totalFerrawin = 1;
+} else {
+    // Lógica normal: buscar planillas según filtros
+    $whereAño = "";
+    if ($año) {
+        // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
+        $whereAño = "AND oh.ZCONTA = '{$año}'";
+    } elseif (!$todos && !$nuevas) {
+        // Por defecto, últimos 2 años (excepto si es --todos o --nuevas)
+        $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
     }
-    Logger::info("Consulta SQL completada");
-} catch (Exception $e) {
-    Logger::error("Error en consulta SQL: " . $e->getMessage());
-    exit(1);
+
+    // Filtro para continuar desde un código específico
+    $whereDesdeCodigo = "";
+    if ($desdeCodigo) {
+        $desdeCodigo = str_replace("'", "''", $desdeCodigo); // Escapar
+        $whereDesdeCodigo = "AND (oh.ZCONTA + '-' + oh.ZCODIGO) <= '{$desdeCodigo}'";
+        Logger::info("Continuando desde código: {$desdeCodigo}");
+    }
+
+    // Construir WHERE dinámicamente
+    $whereClauses = [];
+    if ($whereAño) {
+        $whereClauses[] = ltrim($whereAño, 'AND ');
+    }
+    if ($whereDesdeCodigo) {
+        $whereClauses[] = ltrim($whereDesdeCodigo, 'AND ');
+    }
+    $whereSQL = count($whereClauses) > 0 ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
+
+    $sql = "
+        SELECT DISTINCT
+            oh.ZCONTA + '-' + oh.ZCODIGO as codigo
+        FROM ORD_HEAD oh
+        {$whereSQL}
+        ORDER BY codigo DESC
+    ";
+
+    $modo = $nuevas ? 'nuevas' : ($año ?: 'todos');
+    Logger::info("Buscando planillas...", ['modo' => $modo, 'limite' => $limite ?: 'sin límite']);
+    Logger::info("Ejecutando consulta SQL...");
+
+    try {
+        $stmt = $pdo->query($sql);
+        $codigos = [];
+        while ($row = $stmt->fetch()) {
+            $codigos[] = $row->codigo;
+        }
+        Logger::info("Consulta SQL completada");
+    } catch (Exception $e) {
+        Logger::error("Error en consulta SQL: " . $e->getMessage());
+        exit(1);
+    }
+
+    $totalFerrawin = count($codigos);
+    Logger::info("Encontradas {$totalFerrawin} planillas en FerraWin");
 }
 
-$totalFerrawin = count($codigos);
-Logger::info("Encontradas {$totalFerrawin} planillas en FerraWin");
-
-// Si es modo "nuevas", filtrar las que ya existen en destino
+// Si es modo "nuevas", filtrar las que ya existen en destino Y detectar modificadas
 if ($nuevas) {
-    Logger::info("Obteniendo códigos existentes en {$target}...");
+    Logger::info("Obteniendo códigos existentes en {$target} (con conteo de elementos)...");
     try {
-        $codigosExistentes = $apiClient->getCodigosExistentes();
-        $totalExistentes = count($codigosExistentes);
+        // Obtener códigos CON conteo de elementos para detectar cambios
+        $planillasExistentes = $apiClient->getCodigosConConteo();
+        $totalExistentes = count($planillasExistentes);
         Logger::info("Planillas ya sincronizadas: {$totalExistentes}");
 
-        // Filtrar solo las nuevas
-        Logger::info("Filtrando planillas nuevas...");
-        $codigosExistentesSet = array_flip($codigosExistentes);
-        $codigos = array_filter($codigos, fn($c) => !isset($codigosExistentesSet[$c]));
+        // Separar planillas nuevas de existentes
+        $codigosNuevos = [];
+        $codigosExistentesParaComparar = [];
+
+        foreach ($codigos as $codigo) {
+            if (!isset($planillasExistentes[$codigo])) {
+                $codigosNuevos[] = $codigo;
+            } else {
+                $codigosExistentesParaComparar[] = $codigo;
+            }
+        }
+
+        Logger::info("Planillas nuevas: " . count($codigosNuevos));
+
+        // Detectar planillas modificadas comparando fecha de cálculo (ZFECHACALC)
+        $codigosModificados = [];
+        if (!empty($codigosExistentesParaComparar)) {
+            Logger::info("Verificando cambios en " . count($codigosExistentesParaComparar) . " planillas existentes...");
+
+            // Obtener fechas de cálculo de FerraWin (en batches)
+            $batchSize = 100;
+            $datosFerrawin = [];
+
+            foreach (array_chunk($codigosExistentesParaComparar, $batchSize) as $batch) {
+                $datosFerrawin = array_merge($datosFerrawin, FerrawinQuery::getConteoElementos($batch));
+            }
+
+            // Comparar solo fecha_calculo
+            foreach ($codigosExistentesParaComparar as $codigo) {
+                $fechaManager = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
+                $fechaFW = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
+
+                if ($fechaFW && $fechaFW !== $fechaManager) {
+                    $codigosModificados[] = $codigo;
+                    Logger::debug("  📝 {$codigo}: fecha_calculo {$fechaManager} → {$fechaFW} → MODIFICADA");
+                }
+            }
+
+            Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
+        }
+
+        // Combinar nuevas + modificadas
+        $codigos = array_merge($codigosNuevos, $codigosModificados);
         $codigos = array_values($codigos); // Re-indexar
 
-        $nuevasPlanillas = count($codigos);
-        Logger::info("Planillas nuevas a sincronizar: {$nuevasPlanillas}");
+        $totalASincronizar = count($codigos);
+        Logger::info("Total a sincronizar (nuevas + modificadas): {$totalASincronizar}");
+
     } catch (Exception $e) {
         Logger::error("Error obteniendo códigos existentes: " . $e->getMessage());
         exit(1);
@@ -258,7 +313,7 @@ foreach ($codigos as $i => $codigo) {
         // Si hay un batch pendiente, enviarlo antes de pausar
         if (!empty($batch)) {
             Logger::info("Enviando batch pendiente antes de pausar...");
-            $resultado = $apiClient->enviarPlanillas($batch);
+            $resultado = $apiClient->enviarPlanillas($batch, $syncMetadata);
             if ($resultado['success'] ?? false) {
                 $procesadas += count($batch);
             }
@@ -297,7 +352,7 @@ foreach ($codigos as $i => $codigo) {
 
         if ($debEnviar) {
             Logger::info("Enviando batch de " . count($batch) . " planillas ({$batchElementos} elementos)...");
-            $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
+            $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase, $syncMetadata);
 
             if ($resultado['success'] ?? false) {
                 $procesadas += count($batch);
@@ -325,7 +380,7 @@ foreach ($codigos as $i => $codigo) {
 // Enviar último batch si queda algo
 if (!empty($batch)) {
     Logger::info("Enviando batch final de " . count($batch) . " planillas ({$batchElementos} elementos)...");
-    $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase);
+    $resultado = $apiClient->enviarPlanillasConRetry($batch, $maxReintentos, $delayBase, $syncMetadata);
 
     if ($resultado['success'] ?? false) {
         $procesadas += count($batch);
@@ -368,7 +423,8 @@ if (!empty($batchesFallidos)) {
         $resultado = $apiClient->enviarPlanillasConRetry(
             $batchFallido['planillas'],
             $maxReintentos + 2,  // 2 reintentos extra
-            $delayBase * 2       // Doble delay base
+            $delayBase * 2,      // Doble delay base
+            $syncMetadata
         );
 
         if ($resultado['success'] ?? false) {
@@ -398,13 +454,25 @@ if (!empty($batchesFallidos)) {
 
 $recuperadosFinal = $recuperados ?? 0;
 
-Logger::info("=== Sincronización completada ===", [
-    'total' => $total,
-    'procesadas' => $procesadas,
-    'vacias' => $vacias,
-    'errores' => $errores,
-    'recuperados_pasada_final' => $recuperadosFinal,
-]);
+$duracionTotal = round(microtime(true) - $inicioGlobal, 1);
+$resumen = "Total: {$total} | OK: {$procesadas} | Errores: {$errores} | Vacías: {$vacias} | Duración: {$duracionTotal}s";
+if ($recuperadosFinal > 0) {
+    $resumen .= " | Recuperadas: {$recuperadosFinal}";
+}
+
+Logger::info("=== RESUMEN: {$resumen} ===");
+
+if (!empty($fallidosDefinitivos ?? [])) {
+    foreach ($fallidosDefinitivos as $codigos) {
+        Logger::error("NO SINCRONIZADA: " . implode(', ', $codigos));
+    }
+}
+
+if ($errores > 0) {
+    Logger::warning("=== Sincronización completada con {$errores} errores ===");
+} else {
+    Logger::info("=== Sincronización completada exitosamente ===");
+}
 
 echo "\n";
 echo "=================================\n";
@@ -417,6 +485,7 @@ if ($recuperadosFinal > 0) {
 }
 echo "Vacías:            {$vacias}\n";
 echo "Errores:           {$errores}\n";
+echo "Duración:          {$duracionTotal}s\n";
 echo "=================================\n";
 
 if (!empty($fallidosDefinitivos ?? [])) {

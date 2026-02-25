@@ -68,6 +68,16 @@ class ApiClient
                 'comprimido' => $compress,
             ]);
 
+            // Loguear respuesta del servidor para diagnóstico
+            if (isset($result['data'])) {
+                Logger::info("Respuesta servidor", [
+                    'creadas' => $result['data']['planillas_creadas'] ?? 0,
+                    'actualizadas' => $result['data']['planillas_actualizadas'] ?? 0,
+                    'omitidas' => $result['data']['planillas_omitidas'] ?? 0,
+                    'elementos' => $result['data']['elementos_creados'] ?? 0,
+                ]);
+            }
+
             return [
                 'success' => true,
                 'data' => $result,
@@ -93,7 +103,7 @@ class ApiClient
      * @param int $delayBaseSegundos Delay base en segundos para backoff (default: 5)
      * @return array Resultado con success, data/error, e intentos realizados
      */
-    public function enviarPlanillasConRetry(array $planillas, int $maxReintentos = 3, int $delayBaseSegundos = 5): array
+    public function enviarPlanillasConRetry(array $planillas, int $maxReintentos = 3, int $delayBaseSegundos = 5, array $metadata = []): array
     {
         $intento = 0;
         $ultimoError = null;
@@ -108,7 +118,7 @@ class ApiClient
                 sleep($delay);
             }
 
-            $resultado = $this->enviarPlanillas($planillas);
+            $resultado = $this->enviarPlanillas($planillas, $metadata);
 
             if ($resultado['success'] ?? false) {
                 if ($intento > 1) {
@@ -203,5 +213,23 @@ class ApiClient
         }
 
         return $response['data']['codigos'] ?? [];
+    }
+
+    /**
+     * Obtiene los códigos de planillas existentes CON conteo de elementos.
+     * Se usa para detectar planillas modificadas (diferente número de elementos).
+     *
+     * @return array Mapa de código => conteo de elementos
+     */
+    public function getCodigosConConteo(): array
+    {
+        $response = $this->get('api/ferrawin/codigos-existentes?con_conteo=1');
+
+        if (!($response['success'] ?? false)) {
+            Logger::error("Error obteniendo códigos con conteo: " . ($response['error'] ?? 'desconocido'));
+            return [];
+        }
+
+        return $response['data']['planillas'] ?? [];
     }
 }

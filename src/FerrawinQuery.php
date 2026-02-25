@@ -124,10 +124,10 @@ class FerrawinQuery
     }
 
     /**
-     * Obtiene el conteo de elementos, peso total y checksum de dimensiones por planilla.
+     * Obtiene la fecha de último cálculo (MAX ZFECHACALC) por planilla.
      *
      * @param array $codigos Lista de códigos de planilla
-     * @return array Mapa de código => ['elementos' => int, 'peso' => float, 'checksum' => int]
+     * @return array Mapa de código => ['fecha_calculo' => string|null]
      */
     public static function getConteoElementos(array $codigos): array
     {
@@ -155,14 +155,10 @@ class FerrawinQuery
 
         $whereSQL = implode(' OR ', $conditions);
 
-        // STRING_AGG disponible en SQL Server 2017+
-        // Si no funciona, usar FOR XML PATH como fallback
         $sql = "
             SELECT
                 ob.ZCONTA + '-' + ob.ZCODIGO as codigo,
-                COUNT(*) as total_elementos,
-                ROUND(SUM(CAST(ob.ZPESOTESTD AS FLOAT)), 2) as peso_total,
-                STRING_AGG(ISNULL(CAST(ob.ZFIGURA AS NVARCHAR(MAX)), ''), '|') WITHIN GROUP (ORDER BY ob.ZCODLIN, ob.ZELEMENTO) as dims_concat
+                MAX(ob.ZFECHACALC) as fecha_calculo
             FROM ORD_BAR ob
             WHERE {$whereSQL}
             GROUP BY ob.ZCONTA, ob.ZCODIGO
@@ -174,9 +170,7 @@ class FerrawinQuery
         $resultado = [];
         while ($row = $stmt->fetch()) {
             $resultado[$row->codigo] = [
-                'elementos' => (int)$row->total_elementos,
-                'peso' => round((float)$row->peso_total, 2),
-                'checksum' => crc32($row->dims_concat ?? ''),
+                'fecha_calculo' => $row->fecha_calculo,
             ];
         }
 
@@ -259,6 +253,7 @@ class FerrawinQuery
                 ob.ZCANTIDAD as barras,
                 ob.ZPESOTESTD as peso,
                 ob.ZFIGURA as zfigura,
+                ob.ZFECHACALC as fecha_calculo,
                 COALESCE(pd.ZETIQUETA, '') as etiqueta
             FROM ORD_BAR ob
             LEFT JOIN ORD_HEAD oh ON ob.ZCONTA = oh.ZCONTA AND ob.ZCODIGO = oh.ZCODIGO
@@ -350,12 +345,17 @@ class FerrawinQuery
             ];
         }
 
+        // Calcular MAX fecha_calculo de todos los elementos
+        $fechasCalculo = array_filter(array_column($datos, 'fecha_calculo'));
+        $maxFechaCalculo = !empty($fechasCalculo) ? max($fechasCalculo) : null;
+
         return [
             'codigo' => $codigo,
             'descripcion' => $primerElemento->descripcion_planilla ?? null,
             'seccion' => $primerElemento->seccion ?? null,
             'ensamblado' => $primerElemento->ensamblado ?? null,
             'fecha_creacion_ferrawin' => $primerElemento->fecha ?? null,
+            'ferrawin_fecha_calculo' => $maxFechaCalculo,
             'elementos' => $elementos,
         ];
     }

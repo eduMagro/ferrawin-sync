@@ -2,17 +2,10 @@
 REM =====================================================================
 REM  Sync Listener - Inicia el cliente WebSocket para control remoto
 REM =====================================================================
-REM
-REM  Este script inicia el sync-listener.php que escucha comandos
-REM  de sincronizacion enviados desde produccion via Pusher.
-REM
-REM  Uso:
-REM    start-listener.bat          - Iniciar en modo normal
-REM    start-listener.bat --test   - Iniciar en modo prueba
-REM
-REM =====================================================================
 
-cd /d "C:\xampp\htdocs\ferrawin-sync"
+REM Obtener directorio del script
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%"
 
 echo =====================================================================
 echo  FerraWin Sync Listener
@@ -22,12 +15,26 @@ echo Iniciando cliente WebSocket para control remoto...
 echo Presiona Ctrl+C para detener.
 echo.
 
-REM Verificar que PHP existe
-if not exist "C:\xampp\php\php.exe" (
-    echo ERROR: No se encontro PHP en C:\xampp\php\php.exe
+REM Buscar PHP en ubicaciones comunes
+set "PHP_PATH="
+if exist "C:\xampp\php\php.exe" set "PHP_PATH=C:\xampp\php\php.exe"
+if exist "C:\php\php.exe" set "PHP_PATH=C:\php\php.exe"
+if exist "%SCRIPT_DIR%php\php.exe" set "PHP_PATH=%SCRIPT_DIR%php\php.exe"
+
+REM Si no se encontro, buscar en PATH
+if "%PHP_PATH%"=="" (
+    for %%i in (php.exe) do set "PHP_PATH=%%~$PATH:i"
+)
+
+if "%PHP_PATH%"=="" (
+    echo ERROR: No se encontro PHP.
+    echo Instala XAMPP o PHP y asegurate de que este en el PATH.
     pause
     exit /b 1
 )
+
+echo Usando PHP: %PHP_PATH%
+echo.
 
 REM Verificar que vendor existe
 if not exist "vendor\autoload.php" (
@@ -38,7 +45,7 @@ if not exist "vendor\autoload.php" (
 )
 
 REM Ejecutar el listener
-"C:\xampp\php\php.exe" sync-listener.php %*
+"%PHP_PATH%" sync-listener.php %*
 
 echo.
 echo Listener detenido.
