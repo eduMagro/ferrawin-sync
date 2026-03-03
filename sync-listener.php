@@ -305,6 +305,65 @@ function ejecutarSync(array $params, bool $testMode): void
 }
 
 /**
+ * Fuerza la detención de la sincronización matando el proceso
+ */
+function matarSync(bool $testMode): void
+{
+    global $syncYear, $syncTarget, $lastProgress;
+
+    logMessage("Recibido comando de forzar detención (kill)");
+
+    if ($testMode) {
+        logMessage("[MODO TEST] Se mataría el proceso de sync");
+        return;
+    }
+
+    $pidFile = BASE_DIR . '/sync.pid';
+
+    if (!file_exists($pidFile)) {
+        logMessage("No hay sincronización en curso (no existe sync.pid)");
+        enviarEstado('idle', null, 'No había sincronización en curso');
+        return;
+    }
+
+    $pid = (int) trim(file_get_contents($pidFile));
+
+    if ($pid <= 0) {
+        logMessage("PID inválido en sync.pid: {$pid}", 'WARNING');
+        @unlink($pidFile);
+        return;
+    }
+
+    // Matar el proceso
+    exec("taskkill /PID {$pid} /F 2>&1", $output, $returnCode);
+
+    if ($returnCode === 0) {
+        logMessage("Proceso {$pid} matado correctamente");
+    } else {
+        logMessage("No se pudo matar proceso {$pid}: " . implode(' ', $output), 'WARNING');
+    }
+
+    // Limpiar archivos de control
+    @unlink($pidFile);
+    if (file_exists(PAUSE_FILE)) {
+        @unlink(PAUSE_FILE);
+    }
+
+    enviarEstado('stopped', $lastProgress, 'Sincronización detenida forzosamente', $syncYear);
+
+    $lastProgress = null;
+    $syncYear = null;
+    $syncTarget = null;
+
+    saveStatus([
+        'state' => 'idle',
+        'command' => 'kill',
+    ]);
+
+    logMessage("Archivos de control limpiados");
+}
+
+/**
  * Pausa la sincronización en ejecución
  */
 function pausarSync(bool $testMode): void
@@ -343,6 +402,10 @@ function procesarComando(array $data, bool $testMode): void
 
         case 'pause':
             pausarSync($testMode);
+            break;
+
+        case 'kill':
+            matarSync($testMode);
             break;
 
         case 'status':

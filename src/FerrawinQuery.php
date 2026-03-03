@@ -178,6 +178,53 @@ class FerrawinQuery
     }
 
     /**
+     * Obtiene TODAS las fechas de cálculo de ORD_BAR en una sola query.
+     * Mucho más eficiente que getConteoElementos() en batches cuando hay miles de planillas.
+     *
+     * @param array|null $codigosFiltro Si se pasa, filtra los resultados en PHP (no en SQL)
+     * @return array Mapa de código => ['fecha_calculo' => string|null]
+     */
+    public static function getAllFechasCalculo(?array $codigosFiltro = null): array
+    {
+        $pdo = Database::getConnection();
+
+        $sql = "
+            SELECT
+                ob.ZCONTA + '-' + ob.ZCODIGO as codigo,
+                MAX(ob.ZFECHACALC) as fecha_calculo
+            FROM ORD_BAR ob
+            GROUP BY ob.ZCONTA, ob.ZCODIGO
+        ";
+
+        Logger::info("Consultando fechas de cálculo de todas las planillas (query única)...");
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+
+        $resultado = [];
+        $total = 0;
+
+        // Si hay filtro, convertir a lookup set para O(1)
+        $filtroSet = $codigosFiltro ? array_flip($codigosFiltro) : null;
+
+        while ($row = $stmt->fetch()) {
+            $total++;
+            if ($filtroSet === null || isset($filtroSet[$row->codigo])) {
+                $resultado[$row->codigo] = [
+                    'fecha_calculo' => $row->fecha_calculo,
+                ];
+            }
+        }
+
+        Logger::info("Fechas de cálculo obtenidas", [
+            'total_en_ferrawin' => $total,
+            'filtradas' => count($resultado),
+        ]);
+
+        return $resultado;
+    }
+
+    /**
      * Obtiene solo la cabecera de una planilla (sin elementos).
      */
     public static function getCabeceraPlanilla(string $codigo): ?object

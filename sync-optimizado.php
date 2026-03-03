@@ -232,13 +232,8 @@ if ($nuevas) {
         if (!empty($codigosExistentesParaComparar)) {
             Logger::info("Verificando cambios en " . count($codigosExistentesParaComparar) . " planillas existentes...");
 
-            // Obtener fechas de cálculo de FerraWin (en batches)
-            $batchSize = 100;
-            $datosFerrawin = [];
-
-            foreach (array_chunk($codigosExistentesParaComparar, $batchSize) as $batch) {
-                $datosFerrawin = array_merge($datosFerrawin, FerrawinQuery::getConteoElementos($batch));
-            }
+            // Obtener fechas de cálculo de FerraWin (query única, filtrando en PHP)
+            $datosFerrawin = FerrawinQuery::getAllFechasCalculo($codigosExistentesParaComparar);
 
             // Comparar solo fecha_calculo
             foreach ($codigosExistentesParaComparar as $codigo) {
