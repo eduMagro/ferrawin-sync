@@ -254,7 +254,7 @@ if ($nuevas) {
                     ? (int) $datosFerrawin[$codigo]['total_barras']
                     : null;
 
-                $fechaCambiada  = $fechaFW && $fechaFW !== $fechaManager;
+                $fechaCambiada  = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
                 $pesoCambiado   = $pesoManager !== null && $pesoFW !== null
                     && abs($pesoFW - $pesoManager) > 0.01;
                 $doblesCambiado = $doblesManager !== null && $doblesFW !== null
