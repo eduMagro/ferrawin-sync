@@ -213,31 +213,27 @@ if ($nuevas) {
         $totalExistentes = count($planillasExistentes);
         Logger::info("Planillas ya sincronizadas: {$totalExistentes}");
 
-        // Separar planillas nuevas de existentes
+        // Separar planillas nuevas del rango actual (las que FerraWin tiene en este año/rango
+        // pero Manager aún no conoce)
         $codigosNuevos = [];
-        $codigosExistentesParaComparar = [];
-
         foreach ($codigos as $codigo) {
             if (!isset($planillasExistentes[$codigo])) {
                 $codigosNuevos[] = $codigo;
-            } else {
-                $codigosExistentesParaComparar[] = $codigo;
             }
         }
 
         Logger::info("Planillas nuevas: " . count($codigosNuevos));
 
-        // Detectar planillas modificadas comparando fecha_calculo Y peso_total (doble eje)
-        // - fecha_calculo: detecta modificaciones normales (FerraWin actualiza ZFECHACALC)
-        // - peso_total: detecta casos donde la fecha coincide pero los datos son incorrectos
+        // Detectar modificadas comparando TODAS las planillas de Manager contra FerraWin,
+        // sin restricción de año. Así se detectan cambios en 2026 aunque el sync sea de 2022.
         $codigosModificados = [];
-        if (!empty($codigosExistentesParaComparar)) {
-            Logger::info("Verificando cambios en " . count($codigosExistentesParaComparar) . " planillas existentes...");
+        if (!empty($planillasExistentes)) {
+            Logger::info("Verificando cambios en " . count($planillasExistentes) . " planillas existentes (todos los años)...");
 
-            // Obtener fechas de cálculo + peso total de FerraWin (query única, filtrando en PHP)
-            $datosFerrawin = FerrawinQuery::getAllFechasCalculo($codigosExistentesParaComparar);
+            // Obtener datos de FerraWin filtrando solo las que existen en Manager (O(n) PHP-side)
+            $datosFerrawin = FerrawinQuery::getAllFechasCalculo(array_keys($planillasExistentes));
 
-            foreach ($codigosExistentesParaComparar as $codigo) {
+            foreach (array_keys($planillasExistentes) as $codigo) {
                 $fechaManager    = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
                 $pesoManager     = isset($planillasExistentes[$codigo]['peso_total'])
                     ? round((float) $planillasExistentes[$codigo]['peso_total'], 4)
