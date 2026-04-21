@@ -84,13 +84,23 @@ class ApiClient
             ];
 
         } catch (GuzzleException $e) {
-            Logger::error("Error enviando planillas: {$e->getMessage()}", [
+            // Extraer el body completo de la respuesta si está disponible (Guzzle trunca getMessage())
+            $errorMsg = $e->getMessage();
+            if (method_exists($e, 'getResponse') && $e->getResponse()) {
+                try {
+                    $body = $e->getResponse()->getBody()->getContents();
+                    $decoded = json_decode($body, true);
+                    $errorMsg = $decoded['error'] ?? $decoded['message'] ?? $body;
+                } catch (\Throwable $ignored) {}
+            }
+
+            Logger::error("Error enviando planillas: {$errorMsg}", [
                 'cantidad' => count($planillas),
             ]);
 
             return [
                 'success' => false,
-                'error' => $e->getMessage(),
+                'error' => $errorMsg,
             ];
         }
     }
