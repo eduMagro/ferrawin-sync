@@ -241,33 +241,33 @@ if ($nuevas) {
                 $doblesManager    = isset($planillasExistentes[$codigo]['total_dobleces'])
                     ? (int) $planillasExistentes[$codigo]['total_dobleces']
                     : null;
-                $elementosManager = isset($planillasExistentes[$codigo]['total_elementos'])
-                    ? (int) $planillasExistentes[$codigo]['total_elementos']
+                $barrasManager = isset($planillasExistentes[$codigo]['total_barras'])
+                    ? (int) $planillasExistentes[$codigo]['total_barras']
                     : null;
 
-                $fechaFW     = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
-                $pesoFW      = $datosFerrawin[$codigo]['peso_total'] ?? null;
-                $doblesFW    = isset($datosFerrawin[$codigo]['total_dobleces'])
+                $fechaFW   = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
+                $pesoFW    = $datosFerrawin[$codigo]['peso_total'] ?? null;
+                $doblesFW  = isset($datosFerrawin[$codigo]['total_dobleces'])
                     ? (int) $datosFerrawin[$codigo]['total_dobleces']
                     : null;
-                $elementosFW = isset($datosFerrawin[$codigo]['total_elementos'])
-                    ? (int) $datosFerrawin[$codigo]['total_elementos']
+                $barrasFW  = isset($datosFerrawin[$codigo]['total_barras'])
+                    ? (int) $datosFerrawin[$codigo]['total_barras']
                     : null;
 
-                $fechaCambiada     = $fechaFW && $fechaFW !== $fechaManager;
-                $pesoCambiado      = $pesoManager !== null && $pesoFW !== null
+                $fechaCambiada  = $fechaFW && $fechaFW !== $fechaManager;
+                $pesoCambiado   = $pesoManager !== null && $pesoFW !== null
                     && abs($pesoFW - $pesoManager) > 0.01;
-                $doblesCambiado    = $doblesManager !== null && $doblesFW !== null
+                $doblesCambiado = $doblesManager !== null && $doblesFW !== null
                     && $doblesFW !== $doblesManager;
-                $elementosCambiado = $elementosManager !== null && $elementosFW !== null
-                    && $elementosFW !== $elementosManager;
+                $barrasCambiado = $barrasManager !== null && $barrasFW !== null
+                    && $barrasFW !== $barrasManager;
 
-                if ($fechaCambiada || $pesoCambiado || $doblesCambiado || $elementosCambiado) {
+                if ($fechaCambiada || $pesoCambiado || $doblesCambiado || $barrasCambiado) {
                     $codigosModificados[] = $codigo;
-                    if ($fechaCambiada)       $motivo = "fecha {$fechaManager}→{$fechaFW}";
-                    elseif ($pesoCambiado)    $motivo = "peso {$pesoManager}→{$pesoFW}";
-                    elseif ($doblesCambiado)  $motivo = "dobleces {$doblesManager}→{$doblesFW}";
-                    else                      $motivo = "elementos {$elementosManager}→{$elementosFW}";
+                    if ($fechaCambiada)      $motivo = "fecha {$fechaManager}→{$fechaFW}";
+                    elseif ($pesoCambiado)   $motivo = "peso {$pesoManager}→{$pesoFW}";
+                    elseif ($doblesCambiado) $motivo = "dobleces {$doblesManager}→{$doblesFW}";
+                    else                     $motivo = "barras {$barrasManager}→{$barrasFW}";
                     Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
                 }
             }

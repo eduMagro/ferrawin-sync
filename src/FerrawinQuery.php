@@ -193,8 +193,8 @@ class FerrawinQuery
                 ob.ZCONTA + '-' + ob.ZCODIGO as codigo,
                 MAX(ob.ZFECHACALC) as fecha_calculo,
                 SUM(ob.ZPESOTESTD) as peso_total,
-                SUM(ob.ZNUMBEND) as total_dobleces,
-                COUNT(*) as total_elementos
+                SUM(ob.ZNUMBEND * ob.ZCANTIDAD) as total_dobleces,
+                SUM(ob.ZCANTIDAD) as total_barras
             FROM ORD_BAR ob
             GROUP BY ob.ZCONTA, ob.ZCODIGO
         ";
@@ -214,10 +214,10 @@ class FerrawinQuery
             $total++;
             if ($filtroSet === null || isset($filtroSet[$row->codigo])) {
                 $resultado[$row->codigo] = [
-                    'fecha_calculo'   => $row->fecha_calculo,
-                    'peso_total'      => round((float) $row->peso_total, 4),
-                    'total_dobleces'  => (int) $row->total_dobleces,
-                    'total_elementos' => (int) $row->total_elementos,
+                    'fecha_calculo'  => $row->fecha_calculo,
+                    'peso_total'     => round((float) $row->peso_total, 4),
+                    'total_dobleces' => (int) $row->total_dobleces,
+                    'total_barras'   => (int) $row->total_barras,
                 ];
             }
         }
