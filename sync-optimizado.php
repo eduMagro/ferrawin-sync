@@ -227,22 +227,52 @@ if ($nuevas) {
 
         Logger::info("Planillas nuevas: " . count($codigosNuevos));
 
-        // Detectar planillas modificadas comparando fecha de cálculo (ZFECHACALC)
+        // Detectar planillas modificadas comparando fecha_calculo Y peso_total (doble eje)
+        // - fecha_calculo: detecta modificaciones normales (FerraWin actualiza ZFECHACALC)
+        // - peso_total: detecta casos donde la fecha coincide pero los datos son incorrectos
         $codigosModificados = [];
         if (!empty($codigosExistentesParaComparar)) {
             Logger::info("Verificando cambios en " . count($codigosExistentesParaComparar) . " planillas existentes...");
 
-            // Obtener fechas de cálculo de FerraWin (query única, filtrando en PHP)
+            // Obtener fechas de cálculo + peso total de FerraWin (query única, filtrando en PHP)
             $datosFerrawin = FerrawinQuery::getAllFechasCalculo($codigosExistentesParaComparar);
 
-            // Comparar solo fecha_calculo
             foreach ($codigosExistentesParaComparar as $codigo) {
-                $fechaManager = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
-                $fechaFW = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
+                $fechaManager    = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
+                $pesoManager     = isset($planillasExistentes[$codigo]['peso_total'])
+                    ? round((float) $planillasExistentes[$codigo]['peso_total'], 4)
+                    : null;
+                $doblesManager    = isset($planillasExistentes[$codigo]['total_dobleces'])
+                    ? (int) $planillasExistentes[$codigo]['total_dobleces']
+                    : null;
+                $elementosManager = isset($planillasExistentes[$codigo]['total_elementos'])
+                    ? (int) $planillasExistentes[$codigo]['total_elementos']
+                    : null;
 
-                if ($fechaFW && $fechaFW !== $fechaManager) {
+                $fechaFW     = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
+                $pesoFW      = $datosFerrawin[$codigo]['peso_total'] ?? null;
+                $doblesFW    = isset($datosFerrawin[$codigo]['total_dobleces'])
+                    ? (int) $datosFerrawin[$codigo]['total_dobleces']
+                    : null;
+                $elementosFW = isset($datosFerrawin[$codigo]['total_elementos'])
+                    ? (int) $datosFerrawin[$codigo]['total_elementos']
+                    : null;
+
+                $fechaCambiada     = $fechaFW && $fechaFW !== $fechaManager;
+                $pesoCambiado      = $pesoManager !== null && $pesoFW !== null
+                    && abs($pesoFW - $pesoManager) > 0.01;
+                $doblesCambiado    = $doblesManager !== null && $doblesFW !== null
+                    && $doblesFW !== $doblesManager;
+                $elementosCambiado = $elementosManager !== null && $elementosFW !== null
+                    && $elementosFW !== $elementosManager;
+
+                if ($fechaCambiada || $pesoCambiado || $doblesCambiado || $elementosCambiado) {
                     $codigosModificados[] = $codigo;
-                    Logger::debug("  📝 {$codigo}: fecha_calculo {$fechaManager} → {$fechaFW} → MODIFICADA");
+                    if ($fechaCambiada)       $motivo = "fecha {$fechaManager}→{$fechaFW}";
+                    elseif ($pesoCambiado)    $motivo = "peso {$pesoManager}→{$pesoFW}";
+                    elseif ($doblesCambiado)  $motivo = "dobleces {$doblesManager}→{$doblesFW}";
+                    else                      $motivo = "elementos {$elementosManager}→{$elementosFW}";
+                    Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
                 }
             }
 
