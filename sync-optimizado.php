@@ -283,6 +283,9 @@ if ($nuevas) {
         $codigos = array_merge($codigosNuevos, $codigosModificados);
         $codigos = array_values($codigos); // Re-indexar
 
+        // Set O(1) para saber qué códigos son actualizaciones (vs nuevas importaciones)
+        $codigosModificadosSet = array_flip($codigosModificados);
+
         $totalASincronizar = count($codigos);
         Logger::info("Total a sincronizar (nuevas + modificadas): {$totalASincronizar}");
 
@@ -315,6 +318,9 @@ if ($total === 0) {
     Logger::info("No hay planillas para sincronizar");
     exit(0);
 }
+
+// Set de modificadas para el log (puede estar vacío si no es modo --nuevas)
+$codigosModificadosSet = $codigosModificadosSet ?? [];
 
 // Procesar planillas en batches
 $procesadas = 0;
@@ -363,11 +369,14 @@ foreach ($codigos as $i => $codigo) {
         $numElementos = count($planilla['elementos'] ?? []);
         $sinElementos = $planilla['sin_elementos'] ?? false;
 
-        if ($sinElementos) {
-            Logger::info("{$progreso} Preparando {$codigo} (sin elementos - solo cabecera)");
-        } else {
-            Logger::info("{$progreso} Preparando {$codigo} ({$numElementos} elementos)");
-        }
+        $esActualizacion = isset($codigosModificadosSet[$codigo]);
+        $marcador    = $esActualizacion ? ' [ACTUALIZACIÓN]' : '';
+        $cliente     = trim($planilla['nombre_cliente'] ?? '');
+        $obra        = trim($planilla['nombre_obra'] ?? '');
+        $infoObra    = ($cliente || $obra) ? " | {$cliente} — {$obra}" : '';
+        $infoElems   = $sinElementos ? '(sin elementos)' : "({$numElementos} elementos)";
+
+        Logger::info("{$progreso} Preparando {$codigo}{$marcador}{$infoObra} {$infoElems}");
 
         $batch[] = $planilla;
         $batchElementos += $numElementos;

@@ -125,18 +125,20 @@ function getPusher(): Pusher
 /**
  * Envía estado de sincronización a producción via API HTTP
  */
-function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null): void
+function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null, ?string $lastPlanillaInfo = null, bool $esActualizacion = false): void
 {
     global $apiConfig, $syncTarget;
 
     try {
         $data = [
-            'status' => $status,
-            'progress' => $progress,
-            'message' => $message,
-            'year' => $year,
-            'target' => $target ?? $syncTarget ?? 'production',
-            'last_planilla' => $lastPlanilla,
+            'status'              => $status,
+            'progress'            => $progress,
+            'message'             => $message,
+            'year'                => $year,
+            'target'              => $target ?? $syncTarget ?? 'production',
+            'last_planilla'       => $lastPlanilla,
+            'last_planilla_info'  => $lastPlanillaInfo,
+            'es_actualizacion'    => $esActualizacion,
         ];
 
         // Enviar via API HTTP
@@ -644,15 +646,23 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             $lines = array_slice($lines, -50); // Últimas 50 líneas
 
-            $progress = null;
-            $lastPlanilla = null;
+            $progress         = null;
+            $lastPlanilla     = null;
+            $lastPlanillaInfo = null;
+            $esActualizacion  = false;
 
             foreach (array_reverse($lines) as $line) {
                 if (preg_match('/\[(\d+)\/(\d+)\]/', $line, $matches)) {
                     $progress = "{$matches[1]}/{$matches[2]}";
                 }
-                if (!$lastPlanilla && preg_match('/Preparando (\d{4}-\d+)/', $line, $planillaMatch)) {
-                    $lastPlanilla = $planillaMatch[1];
+                if (!$lastPlanilla && preg_match(
+                    '/Preparando (\d{4}-\d+)(\s+\[ACTUALIZACIÓN\])?(?:\s+\|\s+(.+?))?\s+\(/',
+                    $line,
+                    $planillaMatch
+                )) {
+                    $lastPlanilla     = $planillaMatch[1];
+                    $esActualizacion  = !empty($planillaMatch[2]);
+                    $lastPlanillaInfo = isset($planillaMatch[3]) ? trim($planillaMatch[3]) : null;
                 }
                 if ($progress && $lastPlanilla) {
                     break;
@@ -662,7 +672,7 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             // Solo enviar si el progreso cambió
             if ($progress && $progress !== $lastProgress) {
                 $lastProgress = $progress;
-                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla);
+                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion);
             }
         } elseif (!$isRunning) {
             // Proceso terminó - leer resumen detallado del log
