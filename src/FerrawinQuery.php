@@ -412,6 +412,10 @@ class FerrawinQuery
             'ensamblado' => $primerElemento->ensamblado ?? null,
             'fecha_creacion_ferrawin' => $primerElemento->fecha ?? null,
             'ferrawin_fecha_calculo' => $maxFechaCalculo,
+            'codigo_cliente' => $primerElemento->codigo_cliente ?? '',
+            'nombre_cliente' => $primerElemento->nombre_cliente ?? '',
+            'codigo_obra' => $primerElemento->codigo_obra ?? '',
+            'nombre_obra' => $primerElemento->nombre_obra ?? '',
             'elementos' => $elementos,
         ];
     }
