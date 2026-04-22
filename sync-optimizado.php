@@ -270,6 +270,13 @@ if ($nuevas) {
                     else                     $motivo = "barras {$barrasManager}→{$barrasFW}";
                     Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
                 }
+
+                // Diagnóstico temporal: loguear valores de 2026-002531 siempre
+                if ($codigo === '2026-002531') {
+                    Logger::info("[DIAG 2026-002531] Manager: fecha={$fechaManager} peso={$pesoManager} dobleces={$doblesManager} barras={$barrasManager}");
+                    Logger::info("[DIAG 2026-002531] FerraWin: fecha={$fechaFW} peso={$pesoFW} dobleces={$doblesFW} barras={$barrasFW}");
+                    Logger::info("[DIAG 2026-002531] Cambios: fechaCambiada=" . ($fechaCambiada?'SI':'NO') . " pesoCambiado=" . ($pesoCambiado?'SI':'NO') . " doblesCambiado=" . ($doblesCambiado?'SI':'NO') . " barrasCambiado=" . ($barrasCambiado?'SI':'NO'));
+                }
             }
 
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));

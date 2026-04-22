@@ -188,9 +188,12 @@ class FerrawinQuery
     {
         $pdo = Database::getConnection();
 
+        // ZCONTA es el año (4 dígitos), ZCODIGO puede venir sin zero-padding (ej: '2531').
+        // Normalizamos a 6 dígitos con RIGHT('000000'+ZCODIGO, 6) para que coincida
+        // con los códigos que Manager almacena (ej: '2026-002531').
         $sql = "
             SELECT
-                ob.ZCONTA + '-' + ob.ZCODIGO as codigo,
+                ob.ZCONTA + '-' + RIGHT('000000' + ob.ZCODIGO, 6) as codigo,
                 MAX(ob.ZFECHACALC) as fecha_calculo,
                 SUM(ob.ZPESOTESTD) as peso_total,
                 SUM(ob.ZNUMBEND * ob.ZCANTIDAD) as total_dobleces,
