@@ -377,8 +377,42 @@ function pausarSync(bool $testMode): void
         return;
     }
 
+    $pidFile = BASE_DIR . '/sync.pid';
+
+    if (!file_exists($pidFile)) {
+        logMessage("No hay sincronización en curso (no existe sync.pid), ignorando pausa");
+        enviarEstado('idle', null, 'No había sincronización en curso');
+        return;
+    }
+
+    $pid = (int) trim(file_get_contents($pidFile));
+
+    if ($pid <= 0) {
+        logMessage("PID inválido en sync.pid: {$pid}, ignorando pausa", 'WARNING');
+        @unlink($pidFile);
+        enviarEstado('idle', null, 'No había sincronización en curso');
+        return;
+    }
+
+    // Verificar que el proceso sigue vivo
+    exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
+    $isAlive = false;
+    foreach ($output as $line) {
+        if (strpos($line, (string) $pid) !== false) {
+            $isAlive = true;
+            break;
+        }
+    }
+
+    if (!$isAlive) {
+        logMessage("Proceso sync (PID {$pid}) ya no está activo, ignorando pausa");
+        @unlink($pidFile);
+        enviarEstado('idle', null, 'Sincronización ya finalizada');
+        return;
+    }
+
     file_put_contents(PAUSE_FILE, date('Y-m-d H:i:s'));
-    logMessage("Archivo de pausa creado");
+    logMessage("Archivo de pausa creado para PID {$pid}");
 
     saveStatus([
         'state' => 'pausing',
