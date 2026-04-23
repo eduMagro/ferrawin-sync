@@ -176,6 +176,28 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
 /**
  * Ejecuta la sincronización con los parámetros especificados
  */
+function sincronizaActiva(): bool
+{
+    $pidFile = BASE_DIR . '/sync.pid';
+    if (!file_exists($pidFile)) {
+        return false;
+    }
+    $pid = (int) trim(file_get_contents($pidFile));
+    if ($pid <= 0) {
+        @unlink($pidFile);
+        return false;
+    }
+    exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
+    foreach ($output as $line) {
+        if (strpos($line, (string) $pid) !== false) {
+            return true;
+        }
+    }
+    // PID huérfano — limpiar
+    @unlink($pidFile);
+    return false;
+}
+
 function ejecutarSync(array $params, bool $testMode): void
 {
     global $syncYear, $syncTarget;
@@ -185,6 +207,13 @@ function ejecutarSync(array $params, bool $testMode): void
     $syncTarget = $target;
     $desdeCodigo = $params['desde_codigo'] ?? null;
     $codigoEspecifico = $params['codigo_especifico'] ?? null;
+
+    // Verificar si ya hay una sincronización en curso antes de hacer nada
+    if (!$testMode && sincronizaActiva()) {
+        logMessage("Comando start ignorado: ya hay una sincronización en curso", 'WARNING');
+        enviarEstado('busy', null, 'Ya hay una sincronización en curso. Detenla antes de iniciar una nueva.');
+        return;
+    }
 
     // Si es sincronización de planilla específica
     if ($año === 'especifica' && $codigoEspecifico) {
