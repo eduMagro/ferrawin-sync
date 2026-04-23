@@ -346,7 +346,7 @@ $maxReintentos = 3;           // Reintentos inmediatos por batch
 $delayBase = 5;               // Segundos base para backoff exponencial
 
 foreach ($codigos as $i => $codigo) {
-    // Verificar si se solicitó pausar
+    // Verificar si se solicitó pausar (señal local)
     if (debePausar()) {
         $añoPlanilla = substr($codigo, 0, 4);
         Logger::info("⏸️ PAUSADO por el usuario en planilla: {$codigo}");
@@ -361,6 +361,32 @@ foreach ($codigos as $i => $codigo) {
             }
         }
         exit(0);
+    }
+
+    // Verificar control remoto cada 10 planillas (independiente de Pusher)
+    if ($i % 10 === 0) {
+        $controlAction = $apiClient->checkControl();
+        if ($controlAction === 'stop') {
+            Logger::info("🛑 DETENIDO remotamente por el Manager en planilla: {$codigo}");
+            if (!empty($batch)) {
+                $resultado = $apiClient->enviarPlanillas($batch, $syncMetadata);
+                if ($resultado['success'] ?? false) {
+                    $procesadas += count($batch);
+                }
+            }
+            exit(0);
+        } elseif ($controlAction === 'pause') {
+            $añoPlanilla = substr($codigo, 0, 4);
+            Logger::info("⏸️ PAUSADO remotamente por el Manager en planilla: {$codigo}");
+            Logger::info("Para continuar: php sync-optimizado.php --anio {$añoPlanilla} --desde-codigo {$codigo}");
+            if (!empty($batch)) {
+                $resultado = $apiClient->enviarPlanillas($batch, $syncMetadata);
+                if ($resultado['success'] ?? false) {
+                    $procesadas += count($batch);
+                }
+            }
+            exit(0);
+        }
     }
 
     $progreso = sprintf("[%d/%d]", $i + 1, $total);

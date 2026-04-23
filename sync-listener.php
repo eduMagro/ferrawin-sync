@@ -780,11 +780,15 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
                     }
                 }
 
-                // Detectar si fue pausa
+                // Detectar si fue pausa o detención remota
                 $lastLine = end($lastLines);
-                if (strpos($lastLine, 'pausada') !== false || strpos($lastLine, 'pausa') !== false) {
+                if (strpos($lastLine, 'pausada') !== false || strpos($lastLine, 'pausa') !== false
+                    || strpos($lastLine, 'PAUSADO') !== false) {
                     $estadoFinal = 'paused';
                     $mensaje = 'Sincronización pausada';
+                } elseif (strpos($lastLine, 'DETENIDO remotamente') !== false) {
+                    $estadoFinal = 'paused';
+                    $mensaje = 'Sincronización detenida remotamente por el Manager';
                 }
 
                 // Detectar errores en planillas no sincronizadas

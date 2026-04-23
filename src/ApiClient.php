@@ -211,6 +211,22 @@ class ApiClient
     }
 
     /**
+     * Consulta si hay una acción de control pendiente (stop/pause) establecida desde el Manager.
+     * Retorna 'none', 'stop' o 'pause'. Falla silenciosamente devolviendo 'none'.
+     */
+    public function checkControl(): string
+    {
+        try {
+            $response = $this->client->get('api/ferrawin/sync-control', ['timeout' => 8]);
+            $data = json_decode($response->getBody()->getContents(), true);
+            return $data['action'] ?? 'none';
+        } catch (\Throwable $e) {
+            Logger::warning("No se pudo leer control remoto: {$e->getMessage()}");
+            return 'none';
+        }
+    }
+
+    /**
      * Obtiene los códigos de planillas existentes en el servidor destino.
      */
     public function getCodigosExistentes(): array
