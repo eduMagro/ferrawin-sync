@@ -194,7 +194,7 @@ class FerrawinQuery
         $sql = "
             SELECT
                 ob.ZCONTA + '-' + RIGHT('000000' + ob.ZCODIGO, 6) as codigo,
-                MAX(ob.ZFECHACALC) as fecha_calculo,
+                CONVERT(varchar(19), MAX(ob.ZFECHACALC), 120) as fecha_calculo,
                 SUM(ob.ZPESOTESTD) as peso_total,
                 SUM(ob.ZNUMBEND * ob.ZCANTIDAD) as total_dobleces,
                 SUM(ob.ZCANTIDAD) as total_barras
