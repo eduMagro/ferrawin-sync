@@ -6,7 +6,8 @@
  *   php sync-optimizado.php --anio=2024 --target=local         # Sincronizar año específico
  *   php sync-optimizado.php --anio=2024 --target=production    # Sincronizar a producción
  *   php sync-optimizado.php --todos --target=production        # Sincronizar TODAS las planillas
- *   php sync-optimizado.php --nuevas --target=production       # Solo planillas NUEVAS (no sincronizadas)
+ *   php sync-optimizado.php --nuevas --target=production       # Planillas nuevas + modificadas
+ *   php sync-optimizado.php --modificadas --target=production  # Solo planillas modificadas (ya existentes en Manager)
  *   php sync-optimizado.php --codigo=2026-000886 --target=local # Sincronizar UNA planilla específica
  *   php sync-optimizado.php --test=10 --target=local           # Test con límite
  *   php sync-optimizado.php --anio=2025 --desde-codigo=2025-007816 --target=local  # Continuar desde código
@@ -105,7 +106,7 @@ guardarPid();
 
 Config::load();
 
-$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
+$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'modificadas', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
 
 // Configurar target (local o production)
 $target = $opciones['target'] ?? 'local';
@@ -136,6 +137,7 @@ $año = $opciones['anio'] ?? null;
 $limite = isset($opciones['test']) ? (int)$opciones['test'] : null;
 $todos = isset($opciones['todos']);
 $nuevas = isset($opciones['nuevas']);
+$soloModificadas = isset($opciones['modificadas']);
 $dryRun = isset($opciones['dry-run']);
 $desdeCodigo = $opciones['desde-codigo'] ?? null;
 $codigoEspecifico = $opciones['codigo'] ?? null;
@@ -153,8 +155,8 @@ if ($codigoEspecifico) {
     if ($año) {
         // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
         $whereAño = "AND oh.ZCONTA = '{$año}'";
-    } elseif (!$todos && !$nuevas) {
-        // Por defecto, últimos 2 años (excepto si es --todos o --nuevas)
+    } elseif (!$todos && !$nuevas && !$soloModificadas) {
+        // Por defecto, últimos 2 años (excepto si es --todos, --nuevas o --modificadas)
         $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
     }
 
@@ -184,7 +186,7 @@ if ($codigoEspecifico) {
         ORDER BY codigo DESC
     ";
 
-    $modo = $nuevas ? 'nuevas' : ($año ?: 'todos');
+    $modo = $nuevas ? 'nuevas' : ($soloModificadas ? 'modificadas' : ($año ?: 'todos'));
     Logger::info("Buscando planillas...", ['modo' => $modo, 'limite' => $limite ?: 'sin límite']);
     Logger::info("Ejecutando consulta SQL...");
 
@@ -204,8 +206,8 @@ if ($codigoEspecifico) {
     Logger::info("Encontradas {$totalFerrawin} planillas en FerraWin");
 }
 
-// Si es modo "nuevas", filtrar las que ya existen en destino Y detectar modificadas
-if ($nuevas) {
+// Si es modo "nuevas" o "modificadas", detectar cambios contra Manager
+if ($nuevas || $soloModificadas) {
     Logger::info("Obteniendo códigos existentes en {$target} (con conteo de elementos)...");
     try {
         // Obtener códigos CON conteo de elementos para detectar cambios
@@ -282,15 +284,17 @@ if ($nuevas) {
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
         }
 
-        // Combinar nuevas + modificadas
-        $codigos = array_merge($codigosNuevos, $codigosModificados);
-        $codigos = array_values($codigos); // Re-indexar
+        // Combinar según modo
+        if ($soloModificadas) {
+            $codigos = array_values($codigosModificados);
+            Logger::info("Total a sincronizar (solo modificadas): " . count($codigos));
+        } else {
+            $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
+            Logger::info("Total a sincronizar (nuevas + modificadas): " . count($codigos));
+        }
 
         // Set O(1) para saber qué códigos son actualizaciones (vs nuevas importaciones)
         $codigosModificadosSet = array_flip($codigosModificados);
-
-        $totalASincronizar = count($codigos);
-        Logger::info("Total a sincronizar (nuevas + modificadas): {$totalASincronizar}");
 
     } catch (Exception $e) {
         Logger::error("Error obteniendo códigos existentes: " . $e->getMessage());

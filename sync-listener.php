@@ -251,6 +251,9 @@ function ejecutarSync(array $params, bool $testMode): void
     } elseif ($año === 'nuevas') {
         $args = "--nuevas --target={$target}";
         $mensaje = "Sincronización de nuevas iniciada";
+    } elseif ($año === 'modificadas') {
+        $args = "--modificadas --target={$target}";
+        $mensaje = "Sincronización de modificadas iniciada";
     } else {
         $args = "--anio={$año} --target={$target}";
         $mensaje = "Sincronización {$año} iniciada";
