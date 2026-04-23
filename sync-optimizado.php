@@ -1,18 +1,14 @@
 <?php
 /**
- * Sincronización optimizada - Solo procesa planillas CON DATOS
+ * Sincronización optimizada FerraWin → Manager
  *
- * Uso:
- *   php sync-optimizado.php --anio=2024 --target=local         # Sincronizar año específico
- *   php sync-optimizado.php --anio=2024 --target=production    # Sincronizar a producción
- *   php sync-optimizado.php --todos --target=production        # Sincronizar TODAS las planillas
- *   php sync-optimizado.php --nuevas --target=production       # Planillas nuevas + modificadas
- *   php sync-optimizado.php --modificadas --target=production  # Solo planillas modificadas (ya existentes en Manager)
- *   php sync-optimizado.php --codigo=2026-000886 --target=local # Sincronizar UNA planilla específica
- *   php sync-optimizado.php --test=10 --target=local           # Test con límite
- *   php sync-optimizado.php --anio=2025 --desde-codigo=2025-007816 --target=local  # Continuar desde código
- *
- * Nota: Se usa --anio en vez de --año para evitar problemas de encoding en Windows.
+ * Modos:
+ *   php sync-optimizado.php --target=production               # Incremental (defecto): nuevas + modificadas
+ *   php sync-optimizado.php --rebuild --target=production     # Reconstrucción total (destructivo)
+ *   php sync-optimizado.php --codigo=2026-000886 --target=local  # Una planilla específica
+ *   php sync-optimizado.php --anio=2024 --target=local        # Histórico: todas las de un año
+ *   php sync-optimizado.php --test=10 --target=local          # Límite de prueba
+ *   php sync-optimizado.php --desde-codigo=2026-002531 --target=production  # Continuar desde código
  */
 
 require 'vendor/autoload.php';
@@ -106,14 +102,14 @@ guardarPid();
 
 Config::load();
 
-$opciones = getopt('', ['anio::', 'test::', 'todos', 'nuevas', 'modificadas', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
+$opciones = getopt('', ['anio::', 'test::', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
 
 // Configurar target (local o production)
 $target = $opciones['target'] ?? 'local';
 Config::setTarget($target);
 
 $targetUrl = Config::target('url');
-Logger::info("=== Sincronización Optimizada FerraWin ===");
+Logger::info("=== Sincronización FerraWin ===");
 Logger::info("Target: {$target} ({$targetUrl})");
 
 try {
@@ -132,17 +128,16 @@ try {
     exit(1);
 }
 
-// Obtener planillas CON DATOS (INNER JOIN con ORD_BAR)
-$año = $opciones['anio'] ?? null;
-$limite = isset($opciones['test']) ? (int)$opciones['test'] : null;
-$todos = isset($opciones['todos']);
-$nuevas = isset($opciones['nuevas']);
-$soloModificadas = isset($opciones['modificadas']);
-$dryRun = isset($opciones['dry-run']);
-$desdeCodigo = $opciones['desde-codigo'] ?? null;
+// Modos de ejecución
+$añoHistorico    = $opciones['anio'] ?? null;
+$limite          = isset($opciones['test']) ? (int)$opciones['test'] : null;
+$dryRun          = isset($opciones['dry-run']);
+$desdeCodigo     = $opciones['desde-codigo'] ?? null;
 $codigoEspecifico = $opciones['codigo'] ?? null;
-$rebuild = isset($opciones['rebuild']);
-$syncMetadata = ['modo' => $rebuild ? 'rebuild' : 'incremental'];
+$modoRebuild     = isset($opciones['rebuild']);
+// Incremental = modo por defecto: detecta nuevas + modificadas automáticamente
+$modoIncremental = !$modoRebuild && !$codigoEspecifico && !$añoHistorico;
+$syncMetadata    = ['modo' => $modoRebuild ? 'rebuild' : ($añoHistorico ? "historico-{$añoHistorico}" : 'incremental')];
 
 // Si se especifica un código específico, solo sincronizar esa planilla
 if ($codigoEspecifico) {
@@ -150,32 +145,23 @@ if ($codigoEspecifico) {
     $codigos = [$codigoEspecifico];
     $totalFerrawin = 1;
 } else {
-    // Lógica normal: buscar planillas según filtros
-    $whereAño = "";
-    if ($año) {
-        // Filtrar por ZCONTA (año contable que forma parte del código de planilla)
-        $whereAño = "AND oh.ZCONTA = '{$año}'";
-    } elseif (!$todos && !$nuevas && !$soloModificadas) {
-        // Por defecto, últimos 2 años (excepto si es --todos, --nuevas o --modificadas)
-        $whereAño = "AND oh.ZFECHA >= DATEADD(year, -2, GETDATE())";
-    }
+    // Lógica normal: buscar planillas según modo
+    $whereClauses = [];
 
-    // Filtro para continuar desde un código específico
-    $whereDesdeCodigo = "";
+    if ($añoHistorico) {
+        // Histórico: solo el año indicado
+        $añoEsc = str_replace("'", "''", $añoHistorico);
+        $whereClauses[] = "oh.ZCONTA = '{$añoEsc}'";
+    }
+    // Incremental y Rebuild: sin filtro de año (FerraWin devuelve todo)
+
+    // Filtro para continuar desde un código específico (tras pausa)
     if ($desdeCodigo) {
-        $desdeCodigo = str_replace("'", "''", $desdeCodigo); // Escapar
-        $whereDesdeCodigo = "AND (oh.ZCONTA + '-' + oh.ZCODIGO) <= '{$desdeCodigo}'";
+        $desdeEsc = str_replace("'", "''", $desdeCodigo);
+        $whereClauses[] = "(oh.ZCONTA + '-' + oh.ZCODIGO) <= '{$desdeEsc}'";
         Logger::info("Continuando desde código: {$desdeCodigo}");
     }
 
-    // Construir WHERE dinámicamente
-    $whereClauses = [];
-    if ($whereAño) {
-        $whereClauses[] = ltrim($whereAño, 'AND ');
-    }
-    if ($whereDesdeCodigo) {
-        $whereClauses[] = ltrim($whereDesdeCodigo, 'AND ');
-    }
     $whereSQL = count($whereClauses) > 0 ? 'WHERE ' . implode(' AND ', $whereClauses) : '';
 
     $sql = "
@@ -186,7 +172,7 @@ if ($codigoEspecifico) {
         ORDER BY codigo DESC
     ";
 
-    $modo = $nuevas ? 'nuevas' : ($soloModificadas ? 'modificadas' : ($año ?: 'todos'));
+    $modo = $modoRebuild ? 'rebuild' : ($añoHistorico ? "historico-{$añoHistorico}" : 'incremental');
     Logger::info("Buscando planillas...", ['modo' => $modo, 'limite' => $limite ?: 'sin límite']);
     Logger::info("Ejecutando consulta SQL...");
 
@@ -206,8 +192,8 @@ if ($codigoEspecifico) {
     Logger::info("Encontradas {$totalFerrawin} planillas en FerraWin");
 }
 
-// Si es modo "nuevas" o "modificadas", detectar cambios contra Manager
-if ($nuevas || $soloModificadas) {
+// En modo incremental: detectar qué planillas son nuevas y cuáles han cambiado
+if ($modoIncremental) {
     Logger::info("Obteniendo códigos existentes en {$target} (con conteo de elementos)...");
     try {
         // Obtener códigos CON conteo de elementos para detectar cambios
@@ -272,30 +258,20 @@ if ($nuevas || $soloModificadas) {
                     else                     $motivo = "barras {$barrasManager}→{$barrasFW}";
                     Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
                 }
-
-                // Diagnóstico temporal: loguear valores de 2026-002531 siempre
-                if ($codigo === '2026-002531') {
-                    Logger::info("[DIAG 2026-002531] Manager: fecha={$fechaManager} peso={$pesoManager} dobleces={$doblesManager} barras={$barrasManager}");
-                    Logger::info("[DIAG 2026-002531] FerraWin: fecha={$fechaFW} peso={$pesoFW} dobleces={$doblesFW} barras={$barrasFW}");
-                    Logger::info("[DIAG 2026-002531] Cambios: fechaCambiada=" . ($fechaCambiada?'SI':'NO') . " pesoCambiado=" . ($pesoCambiado?'SI':'NO') . " doblesCambiado=" . ($doblesCambiado?'SI':'NO') . " barrasCambiado=" . ($barrasCambiado?'SI':'NO'));
-                }
             }
 
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
         }
 
-        // Ordenar modificadas descendente (más recientes primero)
+        // Ordenar modificadas descendente (más recientes primero — año mayor, código mayor)
         rsort($codigosModificados);
 
-        // Combinar según modo
-        if ($soloModificadas) {
-            $codigos = array_values($codigosModificados);
-            Logger::info("Total a sincronizar (solo modificadas): " . count($codigos));
-        } else {
-            // Nuevas primero (ya vienen en DESC desde FerraWin), luego modificadas DESC
-            $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
-            Logger::info("Total a sincronizar (nuevas + modificadas): " . count($codigos));
-        }
+        // Combinar: nuevas primero (ya vienen DESC de FerraWin), luego modificadas DESC
+        $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
+        Logger::info("Total a sincronizar: " . count($codigos) . " (" . count($codigosNuevos) . " nuevas + " . count($codigosModificados) . " modificadas)");
+
+        // Línea parseable por el listener para reportar stats al Manager
+        Logger::info("SYNC_STATS: nuevas=" . count($codigosNuevos) . " modificadas=" . count($codigosModificados));
 
         // Set O(1) para saber qué códigos son actualizaciones (vs nuevas importaciones)
         $codigosModificadosSet = array_flip($codigosModificados);

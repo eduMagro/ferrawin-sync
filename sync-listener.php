@@ -15,12 +15,10 @@
  */
 
 require __DIR__ . '/vendor/autoload.php';
-require __DIR__ . '/src/WakeOnLan.php';
 
 use Ratchet\Client\Connector;
 use React\EventLoop\Factory as LoopFactory;
 use Pusher\Pusher;
-use FerrawinSync\WakeOnLan;
 
 // Cargar configuración desde .env
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
@@ -33,6 +31,7 @@ define('PAUSE_FILE', BASE_DIR . '/sync.pause');
 define('LISTENER_PID_FILE', BASE_DIR . '/listener.pid');
 define('STATUS_FILE', BASE_DIR . '/listener.status');
 define('SYNC_LOGFILE_TRACKER', BASE_DIR . '/sync.logfile');
+define('AUTOSYNC_FILE', BASE_DIR . '/sync.autosync');
 
 // Configuración Pusher desde .env
 $pusherConfig = [
@@ -59,8 +58,21 @@ if (empty($pusherConfig['key']) || empty($pusherConfig['secret'])) {
 // Modo de prueba
 $testMode = in_array('--test', $argv);
 
-// Instancia de Wake-on-LAN
-$wol = new WakeOnLan($apiConfig['base_url'], $apiConfig['token']);
+// Estado de auto-sync (cargado desde archivo, persiste entre reinicios del listener)
+$autoSyncState = [
+    'enabled'  => true,
+    'interval' => 30,      // minutos
+    'target'   => 'production',
+    'lastRun'  => 0,       // timestamp UNIX de la última ejecución auto
+];
+if (file_exists(AUTOSYNC_FILE)) {
+    $saved = json_decode(file_get_contents(AUTOSYNC_FILE), true);
+    if (is_array($saved)) {
+        $autoSyncState = array_merge($autoSyncState, $saved);
+    }
+}
+
+logMessage("Auto-sync: " . ($autoSyncState['enabled'] ? "activado cada {$autoSyncState['interval']} min" : "desactivado"));
 
 // Detectar ruta de PHP
 function getPhpPath(): string
@@ -126,7 +138,7 @@ function getPusher(): Pusher
 /**
  * Envía estado de sincronización a producción via API HTTP
  */
-function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null, ?string $lastPlanillaInfo = null, bool $esActualizacion = false): void
+function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null, ?string $lastPlanillaInfo = null, bool $esActualizacion = false, array $detectionStats = []): void
 {
     global $apiConfig, $syncTarget;
 
@@ -140,6 +152,7 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
             'last_planilla'       => $lastPlanilla,
             'last_planilla_info'  => $lastPlanillaInfo,
             'es_actualizacion'    => $esActualizacion,
+            'detection_stats'     => !empty($detectionStats) ? $detectionStats : null,
         ];
 
         // Enviar via API HTTP
@@ -199,157 +212,105 @@ function sincronizaActiva(): bool
     return false;
 }
 
-function ejecutarSync(array $params, bool $testMode): void
+/**
+ * Lanza sync-optimizado.php en background usando VBScript (sin ventana).
+ * Centraliza la ejecución para no duplicar el código VBScript en múltiples lugares.
+ */
+function lanzarProceso(string $args, array $params): void
 {
-    global $syncYear, $syncTarget;
+    $phpPath   = getPhpPath();
+    $scriptPath = BASE_DIR . '\sync-optimizado.php';
+    $vbsFile    = BASE_DIR . '\run-sync-from-listener.vbs';
 
-    $año = $params['año'] ?? null;
-    $target = $params['target'] ?? 'local';
-    $syncTarget = $target;
-    $desdeCodigo = $params['desde_codigo'] ?? null;
-    $codigoEspecifico = $params['codigo_especifico'] ?? null;
+    $vbs  = 'Set WshShell = CreateObject("WScript.Shell")' . "\r\n";
+    $vbs .= 'WshShell.Run """' . $phpPath . '"" ""' . $scriptPath . '"" ' . $args . '", 0, False' . "\r\n";
+    file_put_contents($vbsFile, $vbs);
 
-    // Verificar si ya hay una sincronización en curso antes de hacer nada
-    if (!$testMode && sincronizaActiva()) {
-        logMessage("Comando start ignorado: ya hay una sincronización en curso", 'WARNING');
-        enviarEstado('busy', null, 'Ya hay una sincronización en curso. Detenla antes de iniciar una nueva.');
-        return;
-    }
-
-    // Si es sincronización de planilla específica
-    if ($año === 'especifica' && $codigoEspecifico) {
-        $syncYear = substr($codigoEspecifico, 0, 4);
-        $args = "--codigo={$codigoEspecifico} --target={$target}";
-        $mensaje = "Sincronizando planilla {$codigoEspecifico}";
-
-        logMessage("Preparando sincronización específica: {$args}");
-
-        if ($testMode) {
-            logMessage("[MODO TEST] Se ejecutaría: php sync-optimizado.php {$args}");
-            enviarEstado('test', null, "Modo test: {$args}");
-            return;
-        }
-
-        // Limpiar archivo de pausa si existe
-        if (file_exists(PAUSE_FILE)) {
-            unlink(PAUSE_FILE);
-        }
-
-        // Guardar el path del log activo para tracking ante rollover de medianoche
-        $logActivo = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
-        file_put_contents(SYNC_LOGFILE_TRACKER, $logActivo);
-
-        // Enviar estado "iniciando"
-        enviarEstado('running', '1/1', $mensaje, $syncYear, $codigoEspecifico);
-
-        // Ejecutar en background
-        $phpPath = getPhpPath();
-        $scriptPath = BASE_DIR . '\\sync-optimizado.php';
-
-        $vbsFile = BASE_DIR . '\\run-sync-from-listener.vbs';
-        $vbsContent = 'Set WshShell = CreateObject("WScript.Shell")' . "\r\n";
-        $vbsContent .= 'WshShell.Run """' . $phpPath . '"" ""' . $scriptPath . '"" ' . $args . '", 0, False' . "\r\n";
-        file_put_contents($vbsFile, $vbsContent);
-
-        exec("wscript //nologo \"{$vbsFile}\"", $output, $returnCode);
-
-        if ($returnCode === 0) {
-            logMessage("Sincronización de planilla específica iniciada correctamente");
-            saveStatus([
-                'state' => 'running',
-                'command' => 'start',
-                'params' => $params,
-            ]);
-        } else {
-            logMessage("Error al iniciar sincronización (código: {$returnCode})", 'ERROR');
-            enviarEstado('error', null, "Error al iniciar (código: {$returnCode})");
-        }
-        return;
-    }
-
-    if (!$año) {
-        logMessage("Error: Falta parámetro 'año' en el comando", 'ERROR');
-        enviarEstado('error', null, 'Falta parámetro año');
-        return;
-    }
-
-    $syncYear = $año;
-
-    // Flag rebuild (default: false)
-    $rebuild = $params['rebuild'] ?? false;
-
-    // Construir argumentos
-    if ($año === 'todos') {
-        $args = "--todos --target={$target}";
-        $mensaje = "Sincronización completa iniciada";
-    } elseif ($año === 'nuevas') {
-        $args = "--nuevas --target={$target}";
-        $mensaje = "Sincronización de nuevas iniciada";
-    } elseif ($año === 'modificadas') {
-        $args = "--modificadas --target={$target}";
-        $mensaje = "Sincronización de modificadas iniciada";
-    } else {
-        $args = "--anio={$año} --target={$target}";
-        $mensaje = "Sincronización {$año} iniciada";
-        if ($desdeCodigo) {
-            $args .= " --desde-codigo={$desdeCodigo}";
-            $mensaje .= " desde {$desdeCodigo}";
-        }
-    }
-
-    // Añadir flag rebuild si aplica
-    if ($rebuild) {
-        $args .= ' --rebuild';
-        $mensaje .= ' (RECONSTRUCCIÓN)';
-    }
-
-    logMessage("Preparando sincronización: {$args}");
-
-    if ($testMode) {
-        logMessage("[MODO TEST] Se ejecutaría: php sync-optimizado.php {$args}");
-        enviarEstado('test', null, "Modo test: {$args}");
-        return;
-    }
-
-    // Limpiar archivo de pausa si existe
-    if (file_exists(PAUSE_FILE)) {
-        unlink(PAUSE_FILE);
-    }
-
-    // Guardar el path del log activo para que el timer no pierda el tracking al rotar medianoche
-    $logActivo = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
-    file_put_contents(SYNC_LOGFILE_TRACKER, $logActivo);
-
-    // Enviar estado "iniciando"
-    enviarEstado('running', '0/?', $mensaje, $año);
-
-    // Ejecutar en background usando VBScript (sin ventana visible)
-    $phpPath = getPhpPath();
-    $scriptPath = BASE_DIR . '\\sync-optimizado.php';
-
-    $vbsFile = BASE_DIR . '\\run-sync-from-listener.vbs';
-    $vbsContent = 'Set WshShell = CreateObject("WScript.Shell")' . "\r\n";
-    $vbsContent .= 'WshShell.Run """' . $phpPath . '"" ""' . $scriptPath . '"" ' . $args . '", 0, False' . "\r\n";
-    file_put_contents($vbsFile, $vbsContent);
-
-    exec("wscript //nologo \"{$vbsFile}\"", $output, $returnCode);
+    exec("wscript //nologo \"$vbsFile\"", $output, $returnCode);
 
     if ($returnCode === 0) {
-        logMessage("Sincronización iniciada correctamente");
-        saveStatus([
-            'state' => 'running',
-            'command' => 'start',
-            'params' => $params,
-        ]);
+        logMessage("Proceso iniciado correctamente: $args");
+        saveStatus(['state' => 'running', 'command' => 'start', 'params' => $params]);
     } else {
-        logMessage("Error al iniciar sincronización (código: {$returnCode})", 'ERROR');
+        logMessage("Error al iniciar proceso (código: {$returnCode})", 'ERROR');
         enviarEstado('error', null, "Error al iniciar (código: {$returnCode})");
     }
 }
 
 /**
- * Fuerza la detención de la sincronización matando el proceso
+ * Prepara y lanza la sincronización según el modo recibido.
+ * Acepta 'modo' (nuevo) o 'año' (legado) en $params.
  */
+function ejecutarSync(array $params, bool $testMode): void
+{
+    global $syncYear, $syncTarget;
+
+    // Soporte tanto para 'modo' (nuevo) como 'año' (legado por compatibilidad)
+    $modo             = $params['modo'] ?? $params['año'] ?? 'incremental';
+    $target           = $params['target'] ?? 'production';
+    $syncTarget       = $target;
+    $desdeCodigo      = $params['desde_codigo'] ?? null;
+    $codigoEspecifico = $params['codigo_especifico'] ?? null;
+    $añoHistorico     = $params['anio'] ?? null;
+
+    // Verificar si ya hay una sincronización en curso
+    if (!$testMode && sincronizaActiva()) {
+        logMessage('Comando start ignorado: ya hay una sincronización en curso', 'WARNING');
+        enviarEstado('busy', null, 'Ya hay una sincronización en curso. Detenla antes de iniciar una nueva.');
+        return;
+    }
+
+    // === Planilla específica ===
+    if ($modo === 'especifica' && $codigoEspecifico) {
+        $syncYear = substr($codigoEspecifico, 0, 4);
+        $args     = "--codigo={$codigoEspecifico} --target={$target}";
+        logMessage("Sincronizando planilla específica: {$args}");
+        if ($testMode) { logMessage("[MODO TEST] php sync-optimizado.php {$args}"); return; }
+        if (file_exists(PAUSE_FILE)) unlink(PAUSE_FILE);
+        file_put_contents(SYNC_LOGFILE_TRACKER, LOGS_DIR . '/sync-' . date('Y-m-d') . '.log');
+        enviarEstado('running', '1/1', "Sincronizando {$codigoEspecifico}", $syncYear, $codigoEspecifico);
+        lanzarProceso($args, $params);
+        return;
+    }
+
+    // === Determinar args según modo ===
+    switch ($modo) {
+        case 'rebuild':
+        case 'todos':   // legado
+            $args     = "--rebuild --target={$target}";
+            $mensaje  = 'Reconstrucción total iniciada';
+            $syncYear = 'rebuild';
+            break;
+
+        case 'historico':
+            if (!$añoHistorico) { logMessage('Error: modo historico sin anio', 'ERROR'); return; }
+            $args     = "--anio={$añoHistorico} --target={$target}";
+            $mensaje  = "Histórico {$añoHistorico} iniciado";
+            $syncYear = $añoHistorico;
+            if ($desdeCodigo) { $args .= " --desde-codigo={$desdeCodigo}"; $mensaje .= " desde {$desdeCodigo}"; }
+            break;
+
+        default:
+            // incremental, nuevas (legado), modificadas (legado) — todos detectan nuevas + modificadas
+            $args     = "--target={$target}";
+            $mensaje  = 'Sincronización incremental iniciada (nuevas + modificadas)';
+            $syncYear = 'incremental';
+            if ($desdeCodigo) { $args .= " --desde-codigo={$desdeCodigo}"; $mensaje .= " desde {$desdeCodigo}"; }
+            break;
+    }
+
+    logMessage("Preparando: {$args}");
+
+    if ($testMode) {
+        logMessage("[MODO TEST] php sync-optimizado.php {$args}");
+        return;
+    }
+
+    if (file_exists(PAUSE_FILE)) unlink(PAUSE_FILE);
+    file_put_contents(SYNC_LOGFILE_TRACKER, LOGS_DIR . '/sync-' . date('Y-m-d') . '.log');
+    enviarEstado('running', '0/?', $mensaje, $syncYear);
+    lanzarProceso($args, $params);
+}
 function matarSync(bool $testMode): void
 {
     global $syncYear, $syncTarget, $lastProgress;
@@ -486,8 +447,19 @@ function procesarComando(array $data, bool $testMode): void
             break;
 
         case 'status':
-            logMessage("Comando status recibido - respondiendo con estado actual");
-            // TODO: Implementar respuesta de estado via Pusher
+            logMessage("Comando status recibido");
+            break;
+
+        case 'configure-auto-sync':
+            global $autoSyncState;
+            if (isset($params['enabled']))  $autoSyncState['enabled']  = (bool) $params['enabled'];
+            if (isset($params['interval'])) $autoSyncState['interval'] = max(5, (int) $params['interval']);
+            if (isset($params['target']))   $autoSyncState['target']   = $params['target'];
+            file_put_contents(AUTOSYNC_FILE, json_encode($autoSyncState, JSON_PRETTY_PRINT));
+            $autoSyncState['lastRun'] = 0; // Resetear para que no salte inmediatamente
+            logMessage('Auto-sync reconfigurado: ' . ($autoSyncState['enabled']
+                ? "activado cada {$autoSyncState['interval']} min → {$autoSyncState['target']}"
+                : 'desactivado'));
             break;
 
         default:
@@ -638,16 +610,6 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
                         procesarComando($commandData, $testMode);
                         break;
 
-                    case 'wol-command':
-                        // Evento Wake-on-LAN
-                        global $wol;
-                        $wolData = json_decode($data['data'], true);
-                        if ($testMode) {
-                            logMessage("[MODO TEST] Comando WoL recibido: " . json_encode($wolData));
-                        } else {
-                            $wol->procesarComando($wolData);
-                        }
-                        break;
 
                     case 'pusher:ping':
                         $conn->send(json_encode(['event' => 'pusher:pong', 'data' => '{}']));
@@ -765,14 +727,15 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             $mensaje = 'Sincronización finalizada';
             $estadoFinal = 'completed';
 
-            if (file_exists($logFile)) {
-                $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-                $lastLines = array_slice($lines, -20);
+            $detectionStats = [];
 
-                // Buscar línea de RESUMEN con stats
+            if (file_exists($logFile)) {
+                $lines     = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+                $lastLines = array_slice($lines, -30);
+
+                // Buscar RESUMEN con stats de procesamiento
                 foreach ($lastLines as $line) {
                     if (strpos($line, 'RESUMEN:') !== false) {
-                        // Extraer stats: "Total: X | OK: Y | Errores: Z | ..."
                         if (preg_match('/RESUMEN: (.+) ===/', $line, $m)) {
                             $mensaje = $m[1];
                         }
@@ -780,30 +743,32 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
                     }
                 }
 
-                // Detectar si fue pausa o detención remota
-                $lastLine = end($lastLines);
-                if (strpos($lastLine, 'pausada') !== false || strpos($lastLine, 'pausa') !== false
-                    || strpos($lastLine, 'PAUSADO') !== false) {
-                    $estadoFinal = 'paused';
-                    $mensaje = 'Sincronización pausada';
-                } elseif (strpos($lastLine, 'DETENIDO remotamente') !== false) {
-                    $estadoFinal = 'paused';
-                    $mensaje = 'Sincronización detenida remotamente por el Manager';
-                }
-
-                // Detectar errores en planillas no sincronizadas
-                $noSincronizadas = [];
-                foreach ($lastLines as $line) {
-                    if (strpos($line, 'NO SINCRONIZADA:') !== false) {
-                        $noSincronizadas[] = $line;
+                // Parsear SYNC_STATS (nuevas + modificadas detectadas)
+                foreach ($lines as $line) {
+                    if (preg_match('/SYNC_STATS: nuevas=(\d+) modificadas=(\d+)/', $line, $m)) {
+                        $detectionStats = ['nuevas' => (int)$m[1], 'modificadas' => (int)$m[2]];
+                        break;
                     }
                 }
+
+                // Detectar si fue pausa o detención remota
+                $lastLine = end($lastLines);
+                if (strpos($lastLine, 'PAUSADO') !== false || strpos($lastLine, 'pausa') !== false) {
+                    $estadoFinal = 'paused';
+                    $mensaje     = 'Sincronización pausada';
+                } elseif (strpos($lastLine, 'DETENIDO remotamente') !== false) {
+                    $estadoFinal = 'paused';
+                    $mensaje     = 'Sincronización detenida remotamente';
+                }
+
+                // Detectar batches fallidos definitivos
+                $noSincronizadas = array_filter($lastLines, fn($l) => strpos($l, 'NO SINCRONIZADA:') !== false);
                 if (!empty($noSincronizadas)) {
                     $mensaje .= ' | ' . count($noSincronizadas) . ' batch(es) fallidos';
                 }
             }
 
-            enviarEstado($estadoFinal, $lastProgress, $mensaje, $syncYear);
+            enviarEstado($estadoFinal, $lastProgress, $mensaje, $syncYear, null, null, null, false, $detectionStats);
             logMessage("Sync finalizado: {$mensaje}");
 
             // Limpiar archivos de control al terminar
@@ -842,12 +807,24 @@ $loop->addPeriodicTimer(30, function() use ($testMode) {
     }
 });
 
-// Verificar horarios Wake-on-LAN cada minuto
-$loop->addPeriodicTimer(60, function() use ($testMode, $wol) {
-    if ($testMode) {
+// Auto-sync: comprueba cada 60 s si corresponde lanzar una sincronización automática
+$loop->addPeriodicTimer(60, function() use ($testMode, &$autoSyncState) {
+    if (!$autoSyncState['enabled']) {
         return;
     }
-    $wol->verificarHorariosProgramados();
+    if (sincronizaActiva()) {
+        return; // Ya hay una sync en curso, no lanzar otra
+    }
+
+    $elapsed  = time() - ($autoSyncState['lastRun'] ?? 0);
+    $interval = ($autoSyncState['interval'] ?? 30) * 60;
+
+    if ($elapsed >= $interval) {
+        $autoSyncState['lastRun'] = time();
+        file_put_contents(AUTOSYNC_FILE, json_encode($autoSyncState, JSON_PRETTY_PRINT));
+        logMessage("Auto-sync: lanzando sincronización incremental (han pasado " . round($elapsed / 60) . " min)");
+        ejecutarSync(['modo' => 'incremental', 'target' => $autoSyncState['target'] ?? 'production'], $testMode);
+    }
 });
 
 // Ejecutar el loop

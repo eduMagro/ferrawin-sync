@@ -11,6 +11,7 @@
 sync.pid
 sync.pause
 sync.logfile
+sync.autosync
 listener.pid
 listener.status
 run-sync.bat
