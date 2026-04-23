@@ -284,11 +284,15 @@ if ($nuevas || $soloModificadas) {
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
         }
 
+        // Ordenar modificadas descendente (más recientes primero)
+        rsort($codigosModificados);
+
         // Combinar según modo
         if ($soloModificadas) {
             $codigos = array_values($codigosModificados);
             Logger::info("Total a sincronizar (solo modificadas): " . count($codigos));
         } else {
+            // Nuevas primero (ya vienen en DESC desde FerraWin), luego modificadas DESC
             $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
             Logger::info("Total a sincronizar (nuevas + modificadas): " . count($codigos));
         }
