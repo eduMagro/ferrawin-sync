@@ -32,6 +32,7 @@ define('LOGS_DIR', BASE_DIR . '/logs');
 define('PAUSE_FILE', BASE_DIR . '/sync.pause');
 define('LISTENER_PID_FILE', BASE_DIR . '/listener.pid');
 define('STATUS_FILE', BASE_DIR . '/listener.status');
+define('SYNC_LOGFILE_TRACKER', BASE_DIR . '/sync.logfile');
 
 // Configuración Pusher desde .env
 $pusherConfig = [
@@ -234,6 +235,10 @@ function ejecutarSync(array $params, bool $testMode): void
             unlink(PAUSE_FILE);
         }
 
+        // Guardar el path del log activo para tracking ante rollover de medianoche
+        $logActivo = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+        file_put_contents(SYNC_LOGFILE_TRACKER, $logActivo);
+
         // Enviar estado "iniciando"
         enviarEstado('running', '1/1', $mensaje, $syncYear, $codigoEspecifico);
 
@@ -310,6 +315,10 @@ function ejecutarSync(array $params, bool $testMode): void
     if (file_exists(PAUSE_FILE)) {
         unlink(PAUSE_FILE);
     }
+
+    // Guardar el path del log activo para que el timer no pierda el tracking al rotar medianoche
+    $logActivo = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+    file_put_contents(SYNC_LOGFILE_TRACKER, $logActivo);
 
     // Enviar estado "iniciando"
     enviarEstado('running', '0/?', $mensaje, $año);
@@ -691,7 +700,18 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
     global $syncYear, $syncTarget, $lastProgress, $lastSyncCheck;
 
     $pidFile = BASE_DIR . '/sync.pid';
-    $logFile = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+
+    // Resolver el log activo: usar el path guardado al arrancar la sync para no
+    // perder el tracking cuando el log rota a medianoche.
+    if (file_exists(SYNC_LOGFILE_TRACKER)) {
+        $logFile = trim(file_get_contents(SYNC_LOGFILE_TRACKER));
+        // Si el log guardado ya no existe pero hay uno del día actual, usar el actual
+        if (!file_exists($logFile)) {
+            $logFile = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+        }
+    } else {
+        $logFile = LOGS_DIR . '/sync-' . date('Y-m-d') . '.log';
+    }
 
     // Verificar si hay una sincronización en curso
     if (file_exists($pidFile)) {
@@ -782,10 +802,13 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             enviarEstado($estadoFinal, $lastProgress, $mensaje, $syncYear);
             logMessage("Sync finalizado: {$mensaje}");
 
-            // Limpiar PID file huérfano para no re-detectar en el próximo ciclo
+            // Limpiar archivos de control al terminar
             if (file_exists($pidFile)) {
                 unlink($pidFile);
                 logMessage("PID file limpiado (proceso ya no existe)");
+            }
+            if (file_exists(SYNC_LOGFILE_TRACKER)) {
+                unlink(SYNC_LOGFILE_TRACKER);
             }
 
             $lastProgress = null;

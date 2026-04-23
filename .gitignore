@@ -10,6 +10,7 @@
 # Control files
 sync.pid
 sync.pause
+sync.logfile
 listener.pid
 listener.status
 run-sync.bat
