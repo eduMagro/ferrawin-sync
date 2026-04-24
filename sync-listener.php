@@ -477,24 +477,21 @@ function generateSocketSignature(string $socketId, string $channel, string $key,
     return "{$key}:{$signature}";
 }
 
-// Verificar que no haya otro listener corriendo
-if (file_exists(LISTENER_PID_FILE)) {
-    $existingPid = (int) trim(file_get_contents(LISTENER_PID_FILE));
-    if ($existingPid > 0) {
-        exec("tasklist /FI \"PID eq {$existingPid}\" 2>NUL", $output);
-        $isRunning = false;
-        foreach ($output as $line) {
-            if (strpos($line, (string)$existingPid) !== false) {
-                $isRunning = true;
-                break;
-            }
-        }
-        if ($isRunning) {
-            echo "[ERROR] Ya hay un listener corriendo (PID: {$existingPid})\n";
-            exit(1);
+// Instancia única: matar cualquier otro proceso php corriendo sync-listener.php
+// (no solo el del PID file, que puede estar desactualizado si el proceso anterior
+//  terminó sin limpiar o fue arrancado por una ruta distinta)
+$myPid = getmypid();
+exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $wmicLines);
+foreach ($wmicLines as $wmicLine) {
+    if (preg_match('/ProcessId=(\d+)/i', $wmicLine, $m)) {
+        $otherPid = (int) $m[1];
+        if ($otherPid > 0 && $otherPid !== $myPid) {
+            exec("taskkill /PID {$otherPid} /F 2>NUL");
+            logMessage("Proceso anterior terminado (PID: {$otherPid})");
         }
     }
 }
+unset($wmicLines);
 
 // Guardar PID del listener
 file_put_contents(LISTENER_PID_FILE, getmypid());
