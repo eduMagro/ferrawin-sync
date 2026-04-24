@@ -138,12 +138,12 @@ function getPusher(): Pusher
 /**
  * Envía estado de sincronización a producción via API HTTP
  */
-function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null, ?string $lastPlanillaInfo = null, bool $esActualizacion = false, array $detectionStats = []): void
+function enviarEstado(string $status, ?string $progress = null, ?string $message = null, ?string $year = null, ?string $lastPlanilla = null, ?string $target = null, ?string $lastPlanillaInfo = null, bool $esActualizacion = false, array $detectionStats = [], array $extraData = []): void
 {
     global $apiConfig, $syncTarget;
 
     try {
-        $data = [
+        $data = array_merge([
             'status'              => $status,
             'progress'            => $progress,
             'message'             => $message,
@@ -153,7 +153,7 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
             'last_planilla_info'  => $lastPlanillaInfo,
             'es_actualizacion'    => $esActualizacion,
             'detection_stats'     => !empty($detectionStats) ? $detectionStats : null,
-        ];
+        ], $extraData);
 
         // Enviar via API HTTP
         $url = rtrim($apiConfig['base_url'], '/') . '/api/ferrawin/sync-status';
@@ -687,9 +687,9 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
         }
 
         if ($isRunning && file_exists($logFile)) {
-            // Leer últimas líneas del log para obtener progreso
-            $lines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $lines = array_slice($lines, -50); // Últimas 50 líneas
+            // Leer log completo para stats acumuladas; últimas 50 líneas para progreso
+            $allLines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            $lines    = array_slice($allLines, -50);
 
             $progress         = null;
             $lastPlanilla     = null;
@@ -714,10 +714,55 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
                 }
             }
 
+            // Stats acumuladas de la sesión completa
+            $batchesOk = 0; $batchesErr = 0; $totalErr = 0;
+            $lastBatchPlan = 0; $lastBatchElems = 0;
+            foreach ($allLines as $l) {
+                if (strpos($l, 'Batch OK') !== false || strpos($l, 'Batch recuperado') !== false) {
+                    $batchesOk++;
+                } elseif (strpos($l, 'Error en batch') !== false) {
+                    $batchesErr++;
+                }
+                if (strpos($l, '[ERROR]') !== false) {
+                    $totalErr++;
+                }
+                if (preg_match('/Enviando batch (?:de|final de) (\d+) planillas \((\d+) elementos\)/', $l, $bm)) {
+                    $lastBatchPlan = (int)$bm[1]; $lastBatchElems = (int)$bm[2];
+                }
+            }
+            $cumStats = [
+                'batches_ok'           => $batchesOk,
+                'batches_error'        => $batchesErr,
+                'errores'              => $totalErr,
+                'last_batch_planillas' => $lastBatchPlan,
+                'last_batch_elementos' => $lastBatchElems,
+            ];
+            unset($allLines);
+
             // Solo enviar si el progreso cambió
             if ($progress && $progress !== $lastProgress) {
                 $lastProgress = $progress;
-                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion);
+
+                // Contar procesos activos
+                exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $lLines);
+                $listenersCount = 0;
+                foreach ($lLines as $ll) {
+                    if (preg_match('/ProcessId=(\d+)/i', $ll, $lm) && (int)$lm[1] > 0) $listenersCount++;
+                }
+                unset($lLines);
+
+                exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-optimizado%\'" get processid /format:list 2>NUL', $sLines);
+                $syncsCount = 0;
+                foreach ($sLines as $sl) {
+                    if (preg_match('/ProcessId=(\d+)/i', $sl, $sm) && (int)$sm[1] > 0) $syncsCount++;
+                }
+                unset($sLines);
+
+                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion, [], [
+                    'listeners_count' => $listenersCount,
+                    'syncs_count'     => $syncsCount,
+                    'cum_stats'       => $cumStats,
+                ]);
             }
         } elseif (!$isRunning) {
             // Proceso terminó - leer resumen detallado del log
@@ -793,7 +838,7 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
     }
 });
 
-// Heartbeat cada 30 segundos para mantener el estado actualizado
+// Heartbeat cada 30 segundos: actualiza estado local y envía listener count al Manager cuando idle
 $loop->addPeriodicTimer(30, function() use ($testMode) {
     if (file_exists(STATUS_FILE)) {
         $status = json_decode(file_get_contents(STATUS_FILE), true);
@@ -801,6 +846,21 @@ $loop->addPeriodicTimer(30, function() use ($testMode) {
             $status['heartbeat'] = date('Y-m-d H:i:s');
             file_put_contents(STATUS_FILE, json_encode($status, JSON_PRETTY_PRINT));
         }
+    }
+
+    // Cuando no hay sync activa, notificar al Manager con el listener count
+    // (durante sync activa, el timer de 10s ya envía los counts con cada progreso)
+    if (!sincronizaActiva()) {
+        exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $hLines);
+        $hListeners = 0;
+        foreach ($hLines as $hl) {
+            if (preg_match('/ProcessId=(\d+)/i', $hl, $hm) && (int)$hm[1] > 0) $hListeners++;
+        }
+        unset($hLines);
+        enviarEstado('idle', null, null, null, null, null, null, false, [], [
+            'listeners_count' => $hListeners,
+            'syncs_count'     => 0,
+        ]);
     }
 });
 
