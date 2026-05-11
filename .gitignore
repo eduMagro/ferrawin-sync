@@ -22,7 +22,6 @@ run-sync-from-listener.vbs
 check_*.php
 
 # Instalación local
-instalar-todo.bat
 install-scheduled-task.ps1
 install-startup.bat
 install-task-admin.bat
