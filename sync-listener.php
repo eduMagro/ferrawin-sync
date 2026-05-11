@@ -8,6 +8,7 @@
  * Uso:
  *   php sync-listener.php              # Iniciar listener
  *   php sync-listener.php --test       # Modo de prueba (no ejecuta sync, solo muestra comandos)
+ *   php sync-listener.php --force      # Forzar arranque aunque haya otro listener activo en la red
  *
  * Requisitos:
  *   - composer require pusher/pusher-php-server ratchet/pawl
@@ -32,6 +33,8 @@ define('LISTENER_PID_FILE', BASE_DIR . '/listener.pid');
 define('STATUS_FILE', BASE_DIR . '/listener.status');
 define('SYNC_LOGFILE_TRACKER', BASE_DIR . '/sync.logfile');
 define('AUTOSYNC_FILE', BASE_DIR . '/sync.autosync');
+define('HOST_NAME', gethostname() ?: php_uname('n'));
+define('PRESENCE_CHANNEL', 'presence-ferrawin-listeners');
 
 // Configuración Pusher desde .env
 $pusherConfig = [
@@ -153,13 +156,14 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
             'last_planilla_info'  => $lastPlanillaInfo,
             'es_actualizacion'    => $esActualizacion,
             'detection_stats'     => !empty($detectionStats) ? $detectionStats : null,
+            'hostname'            => HOST_NAME,
         ], $extraData);
 
         // Enviar via API HTTP
         $url = rtrim($apiConfig['base_url'], '/') . '/api/ferrawin/sync-status';
 
         $ch = curl_init($url);
-        curl_setopt_array($ch, [
+        $curlOpts = [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => json_encode($data),
             CURLOPT_HTTPHEADER => [
@@ -170,7 +174,20 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT => 10,
             CURLOPT_SSL_VERIFYPEER => true,
-        ]);
+        ];
+        // Buscar cacert.pem en ubicaciones conocidas (PHP portable no tiene CA bundle propio)
+        $cacertCandidates = [
+            dirname(PHP_BINARY) . '/cacert.pem',
+            BASE_DIR . '/cacert.pem',
+            BASE_DIR . '/php_drivers/cacert.pem',
+        ];
+        foreach ($cacertCandidates as $cacert) {
+            if (file_exists($cacert)) {
+                $curlOpts[CURLOPT_CAINFO] = $cacert;
+                break;
+            }
+        }
+        curl_setopt_array($ch, $curlOpts);
 
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
@@ -223,12 +240,15 @@ function lanzarProceso(string $args, array $params): void
     $vbsFile    = BASE_DIR . '\run-sync-from-listener.vbs';
 
     $vbs  = 'Set WshShell = CreateObject("WScript.Shell")' . "\r\n";
+    $vbs .= 'WshShell.CurrentDirectory = "' . BASE_DIR . '"' . "\r\n";
     $vbs .= 'WshShell.Run """' . $phpPath . '"" ""' . $scriptPath . '"" ' . $args . '", 0, False' . "\r\n";
     file_put_contents($vbsFile, $vbs);
 
     exec("wscript //nologo \"$vbsFile\"", $output, $returnCode);
 
     if ($returnCode === 0) {
+        global $syncLaunchedAt;
+        $syncLaunchedAt = time();
         logMessage("Proceso iniciado correctamente: $args");
         saveStatus(['state' => 'running', 'command' => 'start', 'params' => $params]);
     } else {
@@ -253,8 +273,10 @@ function ejecutarSync(array $params, bool $testMode): void
     $codigoEspecifico = $params['codigo_especifico'] ?? null;
     $añoHistorico     = $params['anio'] ?? null;
 
-    // Verificar si ya hay una sincronización en curso
-    if (!$testMode && sincronizaActiva()) {
+    // Verificar si ya hay una sincronización en curso (incluyendo período de gracia tras lanzamiento)
+    global $syncLaunchedAt;
+    $enGracia = (time() - $syncLaunchedAt) < 15;
+    if (!$testMode && ($enGracia || sincronizaActiva())) {
         logMessage('Comando start ignorado: ya hay una sincronización en curso', 'WARNING');
         enviarEstado('busy', null, 'Ya hay una sincronización en curso. Detenla antes de iniciar una nueva.');
         return;
@@ -477,6 +499,22 @@ function generateSocketSignature(string $socketId, string $channel, string $key,
     return "{$key}:{$signature}";
 }
 
+/**
+ * Genera auth + channel_data para canal de presencia.
+ * El user_id es el hostname del equipo; user_info lleva metadata adicional.
+ */
+function generatePresenceAuth(string $socketId, string $channel, string $userId, array $userInfo): array
+{
+    global $pusherConfig;
+    $channelData = json_encode(['user_id' => $userId, 'user_info' => $userInfo]);
+    $toSign      = "{$socketId}:{$channel}:{$channelData}";
+    $signature   = hash_hmac('sha256', $toSign, $pusherConfig['secret']);
+    return [
+        'auth'         => "{$pusherConfig['key']}:{$signature}",
+        'channel_data' => $channelData,
+    ];
+}
+
 // Instancia única: matar cualquier otro proceso php corriendo sync-listener.php
 // (no solo el del PID file, que puede estar desactualizado si el proceso anterior
 //  terminó sin limpiar o fue arrancado por una ruta distinta)
@@ -492,6 +530,42 @@ foreach ($wmicLines as $wmicLine) {
     }
 }
 unset($wmicLines);
+
+// Verificar instancia única entre PCs via canal de presencia Pusher.
+// El bloque wmic anterior solo protege contra duplicados en este mismo equipo;
+// este chequeo detecta listeners activos en otros PCs de la red.
+try {
+    $presenceInfo = getPusher()->getChannelInfo(PRESENCE_CHANNEL, ['info' => 'user_count,subscription_count']);
+    $activeCount  = $presenceInfo->user_count ?? 0;
+
+    if ($activeCount > 0) {
+        $activeHosts = [];
+        try {
+            $usersResp = getPusher()->get('/channels/' . PRESENCE_CHANNEL . '/users');
+            if (!empty($usersResp['body'])) {
+                $usersData   = json_decode($usersResp['body'], true);
+                $activeHosts = array_column($usersData['users'] ?? [], 'id');
+            }
+        } catch (\Exception $ignored) {}
+
+        logMessage("CONFLICTO: {$activeCount} listener(s) activo(s) en la red:", 'ERROR');
+        foreach ($activeHosts as $host) {
+            logMessage("  → {$host}", 'ERROR');
+        }
+        logMessage("Detén el listener desde la web antes de arrancar aquí.", 'ERROR');
+        logMessage("O fuerza el arranque con: php sync-listener.php --force", 'ERROR');
+
+        if (!in_array('--force', $argv)) {
+            saveStatus(['state' => 'error', 'message' => 'Otro listener activo: ' . implode(', ', $activeHosts)]);
+            exit(1);
+        }
+        logMessage("Modo --force: arrancando con {$activeCount} listener(s) ya activo(s).", 'WARNING');
+    } else {
+        logMessage("Red libre — ningún otro listener activo");
+    }
+} catch (\Exception $e) {
+    logMessage("No se pudo consultar presencia en red: " . $e->getMessage() . " — continuando", 'WARNING');
+}
 
 // Guardar PID del listener
 file_put_contents(LISTENER_PID_FILE, getmypid());
@@ -582,18 +656,73 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
                         $conn->send($subscribeWolMsg);
                         logMessage("Suscribiéndose a canal: {$wolChannel}");
+
+                        // Suscribirse al canal de presencia (visibilidad entre PCs)
+                        $presenceAuth = generatePresenceAuth($socketId, PRESENCE_CHANNEL, HOST_NAME, [
+                            'started_at' => date('Y-m-d H:i:s'),
+                            'pid'        => getmypid(),
+                        ]);
+                        $conn->send(json_encode([
+                            'event' => 'pusher:subscribe',
+                            'data'  => [
+                                'channel'      => PRESENCE_CHANNEL,
+                                'auth'         => $presenceAuth['auth'],
+                                'channel_data' => $presenceAuth['channel_data'],
+                            ],
+                        ]));
+                        logMessage("Suscribiéndose a canal: " . PRESENCE_CHANNEL);
                         break;
 
                     case 'pusher_internal:subscription_succeeded':
                         $channel = $data['channel'] ?? '';
                         logMessage("Suscripción exitosa a: {$channel}");
                         saveStatus([
-                            'state' => 'listening',
-                            'channel' => $channel,
+                            'state'     => 'listening',
+                            'channel'   => $channel,
                             'socket_id' => $socketId,
-                            'pid' => getmypid(),
+                            'pid'       => getmypid(),
+                            'hostname'  => HOST_NAME,
                             'test_mode' => $testMode,
                         ]);
+
+                        // Para el canal de presencia, mostrar quién más está activo en la red
+                        if ($channel === PRESENCE_CHANNEL) {
+                            $presencePayload = json_decode($data['data'] ?? '{}', true);
+                            $memberIds = $presencePayload['presence']['ids'] ?? [];
+                            $others    = array_values(array_filter($memberIds, fn($id) => $id !== HOST_NAME));
+                            if (!empty($others)) {
+                                logMessage("[RED] Otros PCs activos: " . implode(', ', $others));
+                            } else {
+                                logMessage("[RED] Soy el único listener activo en la red");
+                            }
+                        }
+                        break;
+
+                    case 'pusher:member_added':
+                        if (($data['channel'] ?? '') === PRESENCE_CHANNEL) {
+                            $member = json_decode($data['data'] ?? '{}', true);
+                            $host   = $member['user_id'] ?? '?';
+                            logMessage("[RED] PC conectado: {$host}");
+                        }
+                        break;
+
+                    case 'pusher:member_removed':
+                        if (($data['channel'] ?? '') === PRESENCE_CHANNEL) {
+                            $member = json_decode($data['data'] ?? '{}', true);
+                            $host   = $member['user_id'] ?? '?';
+                            logMessage("[RED] PC desconectado: {$host}");
+                        }
+                        break;
+
+                    case 'listener-heartbeat':
+                        if (($data['channel'] ?? '') === PRESENCE_CHANNEL) {
+                            $hb      = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
+                            $hbHost  = $hb['hostname'] ?? '?';
+                            $hbState = $hb['state']    ?? 'desconocido';
+                            $hbProg  = $hb['progress'] ?? null;
+                            $statusStr = $hbProg ? "{$hbState} ({$hbProg})" : $hbState;
+                            logMessage("[RED] {$hbHost}: {$statusStr}");
+                        }
                         break;
 
                     case 'pusher:error':
@@ -653,6 +782,7 @@ $syncYear = null;
 $syncTarget = null;
 $lastProgress = null;
 $lastSyncCheck = 0;
+$syncLaunchedAt = 0; // timestamp del último lanzamiento — gracia para que sync.pid se escriba
 
 // Monitor de sincronización cada 10 segundos
 $loop->addPeriodicTimer(10, function() use ($testMode) {
@@ -739,9 +869,15 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             ];
             unset($allLines);
 
-            // Solo enviar si el progreso cambió
-            if ($progress && $progress !== $lastProgress) {
-                $lastProgress = $progress;
+            // Enviar running si el progreso cambió, o si el proceso acaba de arrancar
+            // y aún no hay patrón [N/M] (fase de verificación inicial)
+            $sinProgreso = ($progress === null && $lastProgress === null);
+            if (($progress && $progress !== $lastProgress) || $sinProgreso) {
+                if ($sinProgreso) {
+                    $lastProgress = 'verificando';
+                } else {
+                    $lastProgress = $progress;
+                }
 
                 // Contar procesos activos
                 exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $lLines);
@@ -758,7 +894,10 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
                 }
                 unset($sLines);
 
-                enviarEstado('running', $progress, "Procesando {$lastPlanilla}", $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion, [], [
+                $mensaje = $sinProgreso
+                    ? 'Analizando cambios en FerraWin...'
+                    : "Procesando {$lastPlanilla}";
+                enviarEstado('running', $progress, $mensaje, $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion, [], [
                     'listeners_count' => $listenersCount,
                     'syncs_count'     => $syncsCount,
                     'cum_stats'       => $cumStats,
@@ -840,6 +979,8 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
 
 // Heartbeat cada 30 segundos: actualiza estado local y envía listener count al Manager cuando idle
 $loop->addPeriodicTimer(30, function() use ($testMode) {
+    global $lastProgress;
+
     if (file_exists(STATUS_FILE)) {
         $status = json_decode(file_get_contents(STATUS_FILE), true);
         if (($status['state'] ?? '') === 'listening') {
@@ -848,9 +989,26 @@ $loop->addPeriodicTimer(30, function() use ($testMode) {
         }
     }
 
+    // Broadcast estado al canal de presencia para que otros PCs vean qué estamos haciendo
+    $currentState = 'idle';
+    if (file_exists(STATUS_FILE)) {
+        $s = json_decode(file_get_contents(STATUS_FILE), true);
+        $currentState = $s['state'] ?? 'idle';
+    }
+    try {
+        getPusher()->trigger(PRESENCE_CHANNEL, 'listener-heartbeat', [
+            'hostname' => HOST_NAME,
+            'state'    => $currentState,
+            'progress' => $lastProgress,
+        ]);
+    } catch (\Exception $ignored) {}
+
     // Cuando no hay sync activa, notificar al Manager con el listener count
     // (durante sync activa, el timer de 10s ya envía los counts con cada progreso)
-    if (!sincronizaActiva()) {
+    // Gracia de 15 s tras lanzar un sync: sync.pid puede tardar en escribirse
+    global $syncLaunchedAt;
+    $gracePeriod = (time() - $syncLaunchedAt) >= 15;
+    if (!sincronizaActiva() && $gracePeriod) {
         exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $hLines);
         $hListeners = 0;
         foreach ($hLines as $hl) {
