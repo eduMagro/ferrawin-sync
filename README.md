@@ -111,6 +111,8 @@ Esto registra la tarea `FerrawinSyncListener` en el Programador de Tareas de Win
 - **Reinicio automático:** Si cae, lo reinicia cada 2 minutos indefinidamente (sin límite de intentos)
 - **Sin timeout:** El proceso puede correr días sin que Windows lo mate
 
+Si la tarea ya estaba instalada con una versión anterior, volver a ejecutar el mismo comando la actualiza automáticamente (borra la anterior y crea la nueva).
+
 Para arrancar la tarea ahora sin reiniciar:
 ```batch
 schtasks /run /tn "FerrawinSyncListener"
