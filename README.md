@@ -491,7 +491,7 @@ tasklist | findstr php
 - **fix:** `src/ApiClient.php` — detección automática de `cacert.pem` para SSL en múltiples rutas (`php/`, raíz del proyecto, `php_drivers/`).
 - **feat:** auto-sync — intervalo mínimo reducido de 5 a 2 minutos en la UI de Manager (`sync-monitor`). Configurable desde el dropdown sin tocar archivos.
 - **fix:** `sync-optimizado.php` — orden de sincronización corregido. Antes: nuevas (DESC) + modificadas (DESC) en bloques separados, causando saltos de código. Ahora: todas mezcladas y ordenadas juntas DESC, garantizando orden cronológico coherente.
-- **feat:** `sync-optimizado.php` — fecha de último cálculo FerraWin (`ZFECHACALC`) visible en los logs por cada planilla: `| calc: YYYY-MM-DD`. Aparece tanto en planillas nuevas como en actualizaciones.
+- **feat:** `sync-optimizado.php` — fecha de último cálculo FerraWin (`ZFECHACALC`) visible en los logs por cada planilla: `| última actualización: YYYY-MM-DD`. Aparece tanto en planillas nuevas como en actualizaciones.
 
 ### 2026-01-12
 - Filtro por ZCONTA en lugar de YEAR(ZFECHA)
