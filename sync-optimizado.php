@@ -263,11 +263,10 @@ if ($modoIncremental) {
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
         }
 
-        // Ordenar modificadas descendente (más recientes primero — año mayor, código mayor)
-        rsort($codigosModificados);
-
-        // Combinar: nuevas primero (ya vienen DESC de FerraWin), luego modificadas DESC
+        // Mezclar y ordenar todo junto DESC para garantizar orden coherente
+        // (antes: nuevas primero → modificadas después, causaba saltos de código)
         $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
+        rsort($codigos);
         Logger::info("Total a sincronizar: " . count($codigos) . " (" . count($codigosNuevos) . " nuevas + " . count($codigosModificados) . " modificadas)");
 
         // Línea parseable por el listener para reportar stats al Manager
