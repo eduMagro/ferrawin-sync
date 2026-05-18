@@ -350,37 +350,36 @@ Los logs se guardan en `logs/sync-YYYY-MM-DD.log`:
 
 El listener incorpora un motor de auto-sync que lanza sincronizaciones incrementales de forma automática y continua, sin intervención manual.
 
-**Configuración activa (`sync.autosync`):**
+**Configuración (`sync.autosync`):**
 ```json
 {
     "enabled": true,
-    "interval": 2,
+    "interval": 30,
     "target": "production",
     "lastRun": 0
 }
 ```
 
 **Comportamiento:**
-- Cada 2 minutos lanza `sync-optimizado.php --target=production` en modo incremental
+- Cada N minutos (configurable) lanza `sync-optimizado.php --target=production` en modo incremental
 - Si no hay cambios en FerraWin: termina en ~15-20s sin hacer nada
 - Si hay cambios: los procesa y sube. El import en Laravel es async (Job en cola), no bloquea la app
 - Nunca solapa: si hay una sync en curso, la siguiente espera
 
 **Ciclo típico:**
 ```
-T+0s   → lanza sync incremental
-T+15s  → sin cambios: sale (coste mínimo)
-T+120s → lanza sync incremental
-T+15s  → sin cambios: sale
+T+0s  → lanza sync incremental
+T+15s → sin cambios: sale (coste mínimo)
+T+Nm  → lanza sync incremental
 ...
 
 Si hay cambios:
-T+0s   → detecta 3 planillas nuevas → las procesa
-T+45s  → sync termina
-T+120s → lanza siguiente sync (nunca solapa)
+T+0s  → detecta planillas nuevas/modificadas → las procesa
+T+45s → sync termina
+T+Nm  → lanza siguiente sync (nunca solapa)
 ```
 
-**Impacto en rendimiento:** negligible. El único coste en producción es un GET a `/api/ferrawin/codigos-existentes` cada 2 minutos (~100ms). Todo el trabajo pesado ocurre en Windows (FerraWin SQL) y en la cola de Jobs de Laravel (async).
+**Impacto en rendimiento:** negligible. El único coste en producción es un GET a `/api/ferrawin/codigos-existentes` por ciclo (~100ms). Todo el trabajo pesado ocurre en Windows (FerraWin SQL) y en la cola de Jobs de Laravel (async).
 
 ### Cambiar el intervalo
 
@@ -490,7 +489,9 @@ tasklist | findstr php
 - **feat:** `sync-listener.php` — modo standby para múltiples ordenadores. En lugar de terminar con error al detectar otro listener activo, el proceso espera en segundo plano y toma el relevo automáticamente cuando el primario cae (polling cada 30s al canal de presencia Pusher).
 - **feat:** `install-scheduled-task.ps1` — Task Scheduler configurado sin límite de reintentos (`RestartCount 99`, `ExecutionTimeLimit 0`). El listener se relanza indefinidamente si cae, sin esperar al próximo reinicio de Windows.
 - **fix:** `src/ApiClient.php` — detección automática de `cacert.pem` para SSL en múltiples rutas (`php/`, raíz del proyecto, `php_drivers/`).
-- **feat:** auto-sync continuo — intervalo reducido a 2 minutos (antes 30). El sistema sincroniza permanentemente sin intervención manual. Mínimo configurable desde la UI de Manager reducido de 5 a 2 minutos.
+- **feat:** auto-sync — intervalo mínimo reducido de 5 a 2 minutos en la UI de Manager (`sync-monitor`). Configurable desde el dropdown sin tocar archivos.
+- **fix:** `sync-optimizado.php` — orden de sincronización corregido. Antes: nuevas (DESC) + modificadas (DESC) en bloques separados, causando saltos de código. Ahora: todas mezcladas y ordenadas juntas DESC, garantizando orden cronológico coherente.
+- **feat:** `sync-optimizado.php` — fecha de último cálculo FerraWin (`ZFECHACALC`) visible en los logs por cada planilla: `| calc: YYYY-MM-DD`. Aparece tanto en planillas nuevas como en actualizaciones.
 
 ### 2026-01-12
 - Filtro por ZCONTA en lugar de YEAR(ZFECHA)
