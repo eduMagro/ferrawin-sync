@@ -108,7 +108,8 @@ powershell -ExecutionPolicy Bypass -File "C:\xampp\htdocs\ferrawin-sync\install-
 Esto registra la tarea `FerrawinSyncListener` en el Programador de Tareas de Windows con estas propiedades:
 - **Desencadenador:** Al iniciar Windows
 - **Acción:** Ejecuta `start-listener-background.vbs` (sin ventana)
-- **Reinicio automático:** Si cae, lo reinicia cada minuto (máx 3 veces)
+- **Reinicio automático:** Si cae, lo reinicia cada 2 minutos indefinidamente (sin límite de intentos)
+- **Sin timeout:** El proceso puede correr días sin que Windows lo mate
 
 Para arrancar la tarea ahora sin reiniciar:
 ```batch
@@ -123,6 +124,27 @@ schtasks /query /tn "FerrawinSyncListener" /fo LIST
 Para desinstalar la tarea:
 ```batch
 schtasks /delete /tn "FerrawinSyncListener" /f
+```
+
+### Múltiples ordenadores — Modo Standby
+
+Si varios ordenadores tienen el listener instalado, **solo uno puede estar activo a la vez** (el primero que arranque). Los demás entran automáticamente en **modo standby**: esperan en segundo plano y toman el relevo solos si el primario cae.
+
+```
+PC1 arranca → activo (conectado a Pusher)
+PC2 arranca → [STANDBY] Sigue activo: PC1 — reintentando en 30s
+PC3 arranca → [STANDBY] Sigue activo: PC1 — reintentando en 30s
+
+PC1 se apaga →
+PC2          → [STANDBY] Red libre — tomando el relevo  ✓
+PC3          → [STANDBY] Sigue activo: PC2 — reintentando en 30s
+```
+
+El standby consulta Pusher cada 30 segundos. Cuando el canal de presencia queda vacío, el siguiente PC en orden de arranque se convierte en el nuevo listener activo. No requiere intervención humana.
+
+Para forzar el arranque ignorando el standby (útil para debug):
+```batch
+php sync-listener.php --force
 ```
 
 ---
@@ -376,7 +398,25 @@ php test-connection.php
 ### No conecta a producción
 - Verificar URL en .env
 - Verificar token válido
-- Verificar certificado SSL
+- Verificar certificado SSL (`ApiClient.php` busca `cacert.pem` en varias rutas automáticamente)
+
+### El listener arranca y se cierra inmediatamente
+Indica que otro listener está activo en la red. Es el comportamiento correcto — entra en standby.
+Comprueba con:
+```batch
+schtasks /query /tn "FerrawinSyncListener" /fo LIST
+```
+El estado será `Listo` (el VBScript terminó) pero el proceso PHP sigue corriendo. Verifica `listener.status`:
+```batch
+type C:\xampp\htdocs\ferrawin-sync\listener.status
+```
+Si el estado es `standby`, todo funciona correctamente.
+
+### El listener no toma el relevo tras caer el primario
+El standby consulta cada 30 segundos. Espera hasta 30s. Si tras ese tiempo sigue sin activarse, verifica que el proceso PHP de standby sigue vivo:
+```batch
+tasklist | findstr php
+```
 
 ### Timeout en batch grande
 - Usar `--test 5` para probar con pocas planillas
@@ -389,11 +429,15 @@ php test-connection.php
 
 ---
 
-## Última Actualización
+## Historial de Cambios
 
-**Fecha:** 2026-01-12
+### 2026-05-18
+- **fix:** `sync-listener.php` — corregido crash `TypeError: json_decode() expects string, array given` en 7 puntos del handler de eventos WebSocket. Pusher/Ratchet a veces entrega `data` ya parseado como array; se añade guardia `is_string()` en todos los casos.
+- **feat:** `sync-listener.php` — modo standby para múltiples ordenadores. En lugar de terminar con error al detectar otro listener activo, el proceso espera en segundo plano y toma el relevo automáticamente cuando el primario cae (polling cada 30s al canal de presencia Pusher).
+- **feat:** `install-scheduled-task.ps1` — Task Scheduler configurado sin límite de reintentos (`RestartCount 99`, `ExecutionTimeLimit 0`). El listener se relanza indefinidamente si cae, sin esperar al próximo reinicio de Windows.
+- **fix:** `src/ApiClient.php` — detección automática de `cacert.pem` para SSL en múltiples rutas (`php/`, raíz del proyecto, `php_drivers/`).
 
-**Cambios recientes:**
+### 2026-01-12
 - Filtro por ZCONTA en lugar de YEAR(ZFECHA)
 - Soporte multi-target (local/production)
 - Sistema de pausa/reanudación
