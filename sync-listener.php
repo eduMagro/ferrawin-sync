@@ -545,32 +545,54 @@ unset($wmicLines);
 // Verificar instancia única entre PCs via canal de presencia Pusher.
 // El bloque wmic anterior solo protege contra duplicados en este mismo equipo;
 // este chequeo detecta listeners activos en otros PCs de la red.
+/**
+ * Devuelve los nombres de los listeners activos en el canal de presencia.
+ */
+function getActiveHosts(): array {
+    try {
+        $usersResp = getPusher()->get('/channels/' . PRESENCE_CHANNEL . '/users');
+        if (!empty($usersResp['body'])) {
+            $usersData = json_decode($usersResp['body'], true);
+            return array_column($usersData['users'] ?? [], 'id');
+        }
+    } catch (\Exception $ignored) {}
+    return [];
+}
+
 try {
     $presenceInfo = getPusher()->getChannelInfo(PRESENCE_CHANNEL, ['info' => 'user_count,subscription_count']);
     $activeCount  = $presenceInfo->user_count ?? 0;
 
-    if ($activeCount > 0) {
-        $activeHosts = [];
-        try {
-            $usersResp = getPusher()->get('/channels/' . PRESENCE_CHANNEL . '/users');
-            if (!empty($usersResp['body'])) {
-                $usersData   = json_decode($usersResp['body'], true);
-                $activeHosts = array_column($usersData['users'] ?? [], 'id');
-            }
-        } catch (\Exception $ignored) {}
-
-        logMessage("CONFLICTO: {$activeCount} listener(s) activo(s) en la red:", 'ERROR');
-        foreach ($activeHosts as $host) {
-            logMessage("  → {$host}", 'ERROR');
-        }
-        logMessage("Detén el listener desde la web antes de arrancar aquí.", 'ERROR');
-        logMessage("O fuerza el arranque con: php sync-listener.php --force", 'ERROR');
-
-        if (!in_array('--force', $argv)) {
-            saveStatus(['state' => 'error', 'message' => 'Otro listener activo: ' . implode(', ', $activeHosts)]);
-            exit(1);
-        }
+    if ($activeCount > 0 && in_array('--force', $argv)) {
         logMessage("Modo --force: arrancando con {$activeCount} listener(s) ya activo(s).", 'WARNING');
+    } elseif ($activeCount > 0) {
+        $activeHosts = getActiveHosts();
+        logMessage("[STANDBY] Listener(s) activo(s) en la red: " . implode(', ', $activeHosts));
+        logMessage("[STANDBY] Esperando a que la red quede libre para tomar el relevo...");
+        logMessage("[STANDBY] (Usa --force para arrancar igualmente)");
+
+        saveStatus([
+            'state'    => 'standby',
+            'primary'  => implode(', ', $activeHosts),
+            'hostname' => HOST_NAME,
+        ]);
+
+        $standbyPoll = 30;
+        while (true) {
+            sleep($standbyPoll);
+            try {
+                $info  = getPusher()->getChannelInfo(PRESENCE_CHANNEL, ['info' => 'user_count']);
+                $count = $info->user_count ?? 0;
+                if ($count === 0) {
+                    logMessage("[STANDBY] Red libre — tomando el relevo");
+                    break;
+                }
+                $hosts = getActiveHosts();
+                logMessage("[STANDBY] Sigue activo: " . implode(', ', $hosts) . " — reintentando en {$standbyPoll}s");
+            } catch (\Exception $e) {
+                logMessage("[STANDBY] No se pudo consultar presencia: " . $e->getMessage() . " — reintentando en {$standbyPoll}s", 'WARNING');
+            }
+        }
     } else {
         logMessage("Red libre — ningún otro listener activo");
     }
