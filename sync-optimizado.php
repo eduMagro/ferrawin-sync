@@ -387,8 +387,10 @@ foreach ($codigos as $i => $codigo) {
         $obra        = trim($planilla['nombre_obra'] ?? '');
         $infoObra    = ($cliente || $obra) ? " | {$cliente} — {$obra}" : '';
         $infoElems   = $sinElementos ? '(sin elementos)' : "({$numElementos} elementos)";
+        $fechaCalc   = $planilla['ferrawin_fecha_calculo'] ?? null;
+        $infoFecha   = $fechaCalc ? ' | calc: ' . substr($fechaCalc, 0, 10) : '';
 
-        Logger::info("{$progreso} Preparando {$codigo}{$marcador}{$infoObra} {$infoElems}");
+        Logger::info("{$progreso} Preparando {$codigo}{$marcador}{$infoObra} {$infoElems}{$infoFecha}");
 
         $batch[] = $planilla;
         $batchElementos += $numElementos;
