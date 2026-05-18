@@ -346,14 +346,66 @@ Los logs se guardan en `logs/sync-YYYY-MM-DD.log`:
 
 ---
 
+## Auto-sync Continuo
+
+El listener incorpora un motor de auto-sync que lanza sincronizaciones incrementales de forma automática y continua, sin intervención manual.
+
+**Configuración activa (`sync.autosync`):**
+```json
+{
+    "enabled": true,
+    "interval": 2,
+    "target": "production",
+    "lastRun": 0
+}
+```
+
+**Comportamiento:**
+- Cada 2 minutos lanza `sync-optimizado.php --target=production` en modo incremental
+- Si no hay cambios en FerraWin: termina en ~15-20s sin hacer nada
+- Si hay cambios: los procesa y sube. El import en Laravel es async (Job en cola), no bloquea la app
+- Nunca solapa: si hay una sync en curso, la siguiente espera
+
+**Ciclo típico:**
+```
+T+0s   → lanza sync incremental
+T+15s  → sin cambios: sale (coste mínimo)
+T+120s → lanza sync incremental
+T+15s  → sin cambios: sale
+...
+
+Si hay cambios:
+T+0s   → detecta 3 planillas nuevas → las procesa
+T+45s  → sync termina
+T+120s → lanza siguiente sync (nunca solapa)
+```
+
+**Impacto en rendimiento:** negligible. El único coste en producción es un GET a `/api/ferrawin/codigos-existentes` cada 2 minutos (~100ms). Todo el trabajo pesado ocurre en Windows (FerraWin SQL) y en la cola de Jobs de Laravel (async).
+
+### Cambiar el intervalo
+
+Desde la UI de Manager (`/sync-monitor`) el dropdown muestra opciones: 2, 5, 15, 30, 60, 120, 240 minutos. El cambio se propaga al listener vía Pusher en tiempo real.
+
+O directamente editando `sync.autosync` y reiniciando el listener.
+
+### Desactivar el auto-sync
+
+```json
+{ "enabled": false, "interval": 2, "target": "production", "lastRun": 0 }
+```
+
+O desde el toggle en la UI de Manager.
+
+---
+
 ## Automatización (Tareas Programadas)
 
 El sistema tiene dos procesos automáticos independientes:
 
 | Proceso | Cuándo | Qué hace |
 |---------|--------|----------|
-| `FerrawinSyncListener` | Al arrancar Windows | Mantiene el listener WebSocket activo para control remoto |
-| `FerrawinSync` | Diariamente a las 14:00 | Ejecuta `sync-ferrawin.bat` (sincronización programada) |
+| `FerrawinSyncListener` | Al arrancar Windows | Mantiene el listener y el auto-sync activos |
+| `FerrawinSync` | Diariamente a las 14:00 | Sync de respaldo vía Task Scheduler (por si el listener no está activo) |
 
 ### Instalar el listener automático
 
@@ -364,7 +416,7 @@ Ver sección [El Listener](#el-listener--control-remoto-desde-producción) arrib
 powershell -ExecutionPolicy Bypass -File "C:\xampp\htdocs\ferrawin-sync\install-scheduled-task.ps1"
 ```
 
-### Instalar la sincronización diaria
+### Instalar la sincronización diaria de respaldo
 
 ```batch
 # Ejecutar como Administrador (una sola vez)
@@ -438,6 +490,7 @@ tasklist | findstr php
 - **feat:** `sync-listener.php` — modo standby para múltiples ordenadores. En lugar de terminar con error al detectar otro listener activo, el proceso espera en segundo plano y toma el relevo automáticamente cuando el primario cae (polling cada 30s al canal de presencia Pusher).
 - **feat:** `install-scheduled-task.ps1` — Task Scheduler configurado sin límite de reintentos (`RestartCount 99`, `ExecutionTimeLimit 0`). El listener se relanza indefinidamente si cae, sin esperar al próximo reinicio de Windows.
 - **fix:** `src/ApiClient.php` — detección automática de `cacert.pem` para SSL en múltiples rutas (`php/`, raíz del proyecto, `php_drivers/`).
+- **feat:** auto-sync continuo — intervalo reducido a 2 minutos (antes 30). El sistema sincroniza permanentemente sin intervención manual. Mínimo configurable desde la UI de Manager reducido de 5 a 2 minutos.
 
 ### 2026-01-12
 - Filtro por ZCONTA en lugar de YEAR(ZFECHA)
