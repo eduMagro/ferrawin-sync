@@ -130,11 +130,22 @@ function saveStatus(array $status): void
 function getPusher(): Pusher
 {
     global $pusherConfig;
+    $options = ['cluster' => $pusherConfig['cluster'], 'useTLS' => true];
+    foreach ([
+        dirname(PHP_BINARY) . '/cacert.pem',
+        BASE_DIR . '/cacert.pem',
+        BASE_DIR . '/php_drivers/cacert.pem',
+    ] as $cacert) {
+        if (file_exists($cacert)) {
+            $options['curl_options'] = [CURLOPT_CAINFO => $cacert];
+            break;
+        }
+    }
     return new Pusher(
         $pusherConfig['key'],
         $pusherConfig['secret'],
         $pusherConfig['app_id'],
-        ['cluster' => $pusherConfig['cluster'], 'useTLS' => true]
+        $options
     );
 }
 
@@ -621,7 +632,7 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
                 switch ($event) {
                     case 'pusher:connection_established':
-                        $eventData = json_decode($data['data'], true);
+                        $eventData = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                         $socketId = $eventData['socket_id'];
                         logMessage("Conexión establecida (socket_id: {$socketId})");
 
@@ -687,7 +698,7 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
                         // Para el canal de presencia, mostrar quién más está activo en la red
                         if ($channel === PRESENCE_CHANNEL) {
-                            $presencePayload = json_decode($data['data'] ?? '{}', true);
+                            $presencePayload = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                             $memberIds = $presencePayload['presence']['ids'] ?? [];
                             $others    = array_values(array_filter($memberIds, fn($id) => $id !== HOST_NAME));
                             if (!empty($others)) {
@@ -700,7 +711,7 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
                     case 'pusher:member_added':
                         if (($data['channel'] ?? '') === PRESENCE_CHANNEL) {
-                            $member = json_decode($data['data'] ?? '{}', true);
+                            $member = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                             $host   = $member['user_id'] ?? '?';
                             logMessage("[RED] PC conectado: {$host}");
                         }
@@ -708,7 +719,7 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
 
                     case 'pusher:member_removed':
                         if (($data['channel'] ?? '') === PRESENCE_CHANNEL) {
-                            $member = json_decode($data['data'] ?? '{}', true);
+                            $member = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                             $host   = $member['user_id'] ?? '?';
                             logMessage("[RED] PC desconectado: {$host}");
                         }
@@ -726,13 +737,13 @@ $connect = function() use ($connector, $wsUrl, $pusherConfig, $testMode, &$loop,
                         break;
 
                     case 'pusher:error':
-                        $errorData = json_decode($data['data'] ?? '{}', true);
+                        $errorData = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                         logMessage("Error de Pusher: " . ($errorData['message'] ?? 'Unknown'), 'ERROR');
                         break;
 
                     case 'sync.command':
                         // Evento personalizado de comando de sincronización
-                        $commandData = json_decode($data['data'], true);
+                        $commandData = is_string($data['data']) ? json_decode($data['data'], true) : ($data['data'] ?? []);
                         procesarComando($commandData, $testMode);
                         break;
 

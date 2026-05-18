@@ -19,9 +19,23 @@ class ApiClient
         $this->baseUrl = Config::production('url');
         $this->token = Config::production('token');
 
+        $baseDir = dirname(__DIR__);
+        $verify = true;
+        foreach ([
+            dirname(PHP_BINARY) . '/cacert.pem',
+            $baseDir . '/cacert.pem',
+            $baseDir . '/php_drivers/cacert.pem',
+        ] as $cacert) {
+            if (file_exists($cacert)) {
+                $verify = $cacert;
+                break;
+            }
+        }
+
         $this->client = new Client([
             'base_uri' => $this->baseUrl,
             'timeout' => 300, // 5 minutos para batches grandes
+            'verify' => $verify,
             'headers' => [
                 'Accept' => 'application/json',
                 'Content-Type' => 'application/json',

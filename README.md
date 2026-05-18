@@ -13,11 +13,11 @@ Sistema de sincronización entre FerraWin (SQL Server) y la aplicación Manager 
 │   │   SQL Server    │◄──────│   (Script PHP)      │            │
 │   │  192.168.0.7    │       │                     │            │
 │   └─────────────────┘       └──────────┬──────────┘            │
-│                                        │                        │
-└────────────────────────────────────────┼────────────────────────┘
-                                         │
-                                         │ HTTPS (API POST)
-                                         ▼
+│                                        │ ▲                      │
+└────────────────────────────────────────┼─┼──────────────────────┘
+                                         │ │
+                         HTTPS (API POST)│ │ WebSocket (Pusher)
+                                         ▼ │
                             ┌─────────────────────────┐
                             │  Servidor Producción    │
                             │ app.hierrospacoreyes.es │
@@ -25,14 +25,23 @@ Sistema de sincronización entre FerraWin (SQL Server) y la aplicación Manager 
                             └─────────────────────────┘
 ```
 
+El sistema tiene **dos canales de comunicación**:
+- **Salida (→):** `sync-optimizado.php` envía planillas por HTTPS a la API de producción
+- **Entrada (←):** `sync-listener.php` mantiene una conexión WebSocket con Pusher y recibe comandos desde la UI de producción
+
 ## Estructura del Proyecto
 
 ```
 ferrawin-sync/
-├── sync-optimizado.php    ← Script principal (RECOMENDADO)
-├── sync.php               ← Script antiguo (más opciones, menos eficiente)
-├── test-connection.php    ← Verificar conexiones
-├── check_datos.php        ← Debug de planilla específica
+├── sync-optimizado.php            ← Script principal de sincronización (RECOMENDADO)
+├── sync.php                       ← Script antiguo (más opciones, menos eficiente)
+├── sync-listener.php              ← Daemon WebSocket — escucha comandos remotos vía Pusher
+├── start-listener.bat             ← Inicia el listener (con ventana, para debug)
+├── start-listener-background.vbs ← Inicia el listener en segundo plano (sin ventana)
+├── stop-listener.bat              ← Detiene el listener
+├── install-scheduled-task.ps1    ← Instala arranque automático en Task Scheduler
+├── test-connection.php            ← Verificar conexiones
+├── check_datos.php                ← Debug de planilla específica
 ├── src/
 │   ├── Config.php         ← Configuración desde .env
 │   ├── Database.php       ← Conexión SQL Server
@@ -43,6 +52,80 @@ ferrawin-sync/
 ├── .env                   ← Configuración (credenciales, URLs)
 └── vendor/                ← Dependencias (Composer)
 ```
+
+## El Listener — Control Remoto desde Producción
+
+`sync-listener.php` es un proceso PHP permanente que mantiene una conexión WebSocket con Pusher. Su función es recibir comandos enviados desde la UI de producción (`app.hierrospacoreyes.es`) y ejecutar la sincronización en el Windows local, donde FerraWin es accesible.
+
+**Sin el listener activo, los botones de sincronización de la UI de producción no tienen efecto.**
+
+### Flujo de control remoto
+
+```
+Usuario pulsa "Sincronizar" en producción
+        │
+        ▼
+  Laravel emite SyncCommandEvent
+        │
+        ▼
+  Pusher WebSocket (private-sync-control)
+        │
+        ▼
+  sync-listener.php (Windows local)
+        │
+        ▼
+  Ejecuta sync-optimizado.php en background
+        │
+        ▼
+  Envía estado cada 10s → /api/ferrawin/sync-status
+        │
+        ▼
+  UI de producción muestra progreso en tiempo real
+```
+
+### Cómo arrancarlo
+
+**Opción A — Con ventana visible (para debug):**
+```batch
+start-listener.bat
+```
+Muestra logs en tiempo real. Se cierra con `Ctrl+C`.
+
+**Opción B — En segundo plano (recomendado para uso diario):**
+```batch
+start-listener-background.vbs
+```
+Sin ventana visible. Para detenerlo: `stop-listener.bat` o Administrador de Tareas → buscar `php.exe`.
+
+### Arranque automático al iniciar Windows (sin ejecutarlo manualmente)
+
+Para que el listener arranque solo cada vez que se enciende el ordenador, instala la tarea programada ejecutando **una sola vez** como Administrador:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\xampp\htdocs\ferrawin-sync\install-scheduled-task.ps1"
+```
+
+Esto registra la tarea `FerrawinSyncListener` en el Programador de Tareas de Windows con estas propiedades:
+- **Desencadenador:** Al iniciar Windows
+- **Acción:** Ejecuta `start-listener-background.vbs` (sin ventana)
+- **Reinicio automático:** Si cae, lo reinicia cada minuto (máx 3 veces)
+
+Para arrancar la tarea ahora sin reiniciar:
+```batch
+schtasks /run /tn "FerrawinSyncListener"
+```
+
+Para verificar que está corriendo:
+```batch
+schtasks /query /tn "FerrawinSyncListener" /fo LIST
+```
+
+Para desinstalar la tarea:
+```batch
+schtasks /delete /tn "FerrawinSyncListener" /f
+```
+
+---
 
 ## Scripts Disponibles
 
@@ -239,33 +322,32 @@ Los logs se guardan en `logs/sync-YYYY-MM-DD.log`:
 
 ---
 
-## Automatización (Tarea Programada)
+## Automatización (Tareas Programadas)
 
-Para ejecutar automáticamente cada día:
+El sistema tiene dos procesos automáticos independientes:
 
-### Windows (Programador de Tareas)
+| Proceso | Cuándo | Qué hace |
+|---------|--------|----------|
+| `FerrawinSyncListener` | Al arrancar Windows | Mantiene el listener WebSocket activo para control remoto |
+| `FerrawinSync` | Diariamente a las 14:00 | Ejecuta `sync-ferrawin.bat` (sincronización programada) |
 
-1. Crear archivo `sync-diario.bat`:
+### Instalar el listener automático
+
+Ver sección [El Listener](#el-listener--control-remoto-desde-producción) arriba. En resumen:
+
+```powershell
+# Ejecutar como Administrador (una sola vez)
+powershell -ExecutionPolicy Bypass -File "C:\xampp\htdocs\ferrawin-sync\install-scheduled-task.ps1"
+```
+
+### Instalar la sincronización diaria
+
 ```batch
-@echo off
-cd /d C:\ferrawin-sync
-C:\php\php.exe sync-optimizado.php --año 2025 --target production
+# Ejecutar como Administrador (una sola vez)
+create-task.bat
 ```
 
-2. Crear tarea programada:
-   - Programa: `C:\ferrawin-sync\sync-diario.bat`
-   - Desencadenador: Diario a las 14:00
-   - Ejecutar con privilegios más altos: Sí
-
-### Linux (Cron)
-
-```bash
-# Editar crontab
-crontab -e
-
-# Añadir línea (ejecutar a las 14:00 cada día)
-0 14 * * * cd /var/www/ferrawin-sync && php sync-optimizado.php --año 2025 --target production >> /var/log/ferrawin-sync.log 2>&1
-```
+Crea la tarea `FerrawinSync` que ejecuta `sync-ferrawin.bat` todos los días a las 14:00.
 
 ---
 
