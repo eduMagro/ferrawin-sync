@@ -220,23 +220,31 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
  */
 function sincronizaActiva(): bool
 {
+    // Comprobar sync.pid (proceso que este listener conoce)
     $pidFile = BASE_DIR . '/sync.pid';
-    if (!file_exists($pidFile)) {
-        return false;
-    }
-    $pid = (int) trim(file_get_contents($pidFile));
-    if ($pid <= 0) {
+    if (file_exists($pidFile)) {
+        $pid = (int) trim(file_get_contents($pidFile));
+        if ($pid > 0) {
+            exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
+            foreach ($output as $line) {
+                if (strpos($line, (string) $pid) !== false) {
+                    return true;
+                }
+            }
+        }
+        // PID huérfano — limpiar
         @unlink($pidFile);
-        return false;
     }
-    exec("tasklist /FI \"PID eq {$pid}\" 2>NUL", $output);
-    foreach ($output as $line) {
-        if (strpos($line, (string) $pid) !== false) {
+
+    // Fallback: detectar cualquier sync-optimizado.php corriendo aunque no esté en sync.pid
+    // (procesos huérfanos de instancias anteriores del listener)
+    exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-optimizado%\'" get processid /format:list 2>NUL', $lines);
+    foreach ($lines as $line) {
+        if (preg_match('/ProcessId=(\d+)/i', $line, $m) && (int)$m[1] > 0) {
             return true;
         }
     }
-    // PID huérfano — limpiar
-    @unlink($pidFile);
+
     return false;
 }
 
@@ -357,31 +365,32 @@ function matarSync(bool $testMode): void
 
     $pidFile = BASE_DIR . '/sync.pid';
 
-    if (!file_exists($pidFile)) {
-        logMessage("No hay sincronización en curso (no existe sync.pid)");
-        enviarEstado('idle', null, 'No había sincronización en curso');
-        return;
-    }
-
-    $pid = (int) trim(file_get_contents($pidFile));
-
-    if ($pid <= 0) {
-        logMessage("PID inválido en sync.pid: {$pid}", 'WARNING');
+    // Matar el proceso rastreado en sync.pid (si existe)
+    if (file_exists($pidFile)) {
+        $pid = (int) trim(file_get_contents($pidFile));
+        if ($pid > 0) {
+            exec("taskkill /PID {$pid} /F 2>&1", $output, $returnCode);
+            if ($returnCode === 0) {
+                logMessage("Proceso {$pid} matado correctamente");
+            } else {
+                logMessage("No se pudo matar proceso {$pid}: " . implode(' ', $output), 'WARNING');
+            }
+        }
         @unlink($pidFile);
-        return;
     }
 
-    // Matar el proceso
-    exec("taskkill /PID {$pid} /F 2>&1", $output, $returnCode);
-
-    if ($returnCode === 0) {
-        logMessage("Proceso {$pid} matado correctamente");
-    } else {
-        logMessage("No se pudo matar proceso {$pid}: " . implode(' ', $output), 'WARNING');
+    // Matar TODOS los sync-optimizado.php (incluye huérfanos de sesiones anteriores)
+    exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-optimizado%\'" get processid /format:list 2>NUL', $orphanLines);
+    foreach ($orphanLines as $orphanLine) {
+        if (preg_match('/ProcessId=(\d+)/i', $orphanLine, $om)) {
+            $orphanPid = (int)$om[1];
+            if ($orphanPid > 0) {
+                exec("taskkill /PID {$orphanPid} /F 2>&1");
+                logMessage("Proceso huérfano {$orphanPid} terminado");
+            }
+        }
     }
 
-    // Limpiar archivos de control
-    @unlink($pidFile);
     if (file_exists(PAUSE_FILE)) {
         @unlink(PAUSE_FILE);
     }

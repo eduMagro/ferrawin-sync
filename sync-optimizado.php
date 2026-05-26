@@ -244,7 +244,7 @@ if ($modoIncremental) {
 
                 $fechaCambiada  = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
                 $pesoCambiado   = $pesoManager !== null && $pesoFW !== null
-                    && abs($pesoFW - $pesoManager) > 0.01;
+                    && abs($pesoFW - $pesoManager) > 1.0;
                 $doblesCambiado = $doblesManager !== null && $doblesFW !== null
                     && $doblesFW !== $doblesManager;
                 $barrasCambiado = $barrasManager !== null && $barrasFW !== null
