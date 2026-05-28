@@ -100,9 +100,15 @@ limpiarArchivosHuerfanos();
 register_shutdown_function('limpiarPid');
 guardarPid();
 
+// Parsear --log-level antes de Config::load() para que $_ENV esté listo cuando Config lo lea
+$logLevelPre = getopt('', ['log-level::']);
+if (!empty($logLevelPre['log-level'])) {
+    $_ENV['LOG_LEVEL'] = strtolower($logLevelPre['log-level']);
+}
+
 Config::load();
 
-$opciones = getopt('', ['anio::', 'test::', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild']);
+$opciones = getopt('', ['anio::', 'test::', 'dry-run', 'desde-codigo::', 'target::', 'codigo::', 'rebuild', 'log-level::']);
 
 // Configurar target (local o production)
 $target = $opciones['target'] ?? 'local';
