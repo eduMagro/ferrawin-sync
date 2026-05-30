@@ -113,6 +113,18 @@ function logMessage(string $message, string $level = 'INFO'): void
         mkdir(LOGS_DIR, 0755, true);
     }
     file_put_contents($logFile, $logLine, FILE_APPEND);
+
+    // Reenviar también al log central único de Manager, omitiendo el ruido repetitivo
+    // (heartbeats de presencia, confirmaciones de estado/suscripción) para que el archivo
+    // central muestre la actividad real de sincronización y no se inunde.
+    if (function_exists('bufferLogCentral')) {
+        $esRuido = strpos($message, '[RED]') !== false
+            || strpos($message, 'Estado enviado via API') !== false
+            || strpos($message, 'Suscri') !== false;
+        if (!$esRuido) {
+            bufferLogCentral($logLine);
+        }
+    }
 }
 
 /**
@@ -285,6 +297,88 @@ function reclamarSync(string $target): bool
     }
 
     return $granted;
+}
+
+// Buffer de líneas pendientes de enviar al log central único de Manager.
+$logBuffer = [];
+
+/**
+ * Acumula líneas para reenviarlas al log central de Manager (no hace HTTP: solo encola).
+ * El envío real lo hace flushLogCentral() desde un timer.
+ */
+function bufferLogCentral($lines): void
+{
+    global $logBuffer;
+    if (!is_array($logBuffer)) {
+        $logBuffer = [];
+    }
+    if (is_string($lines)) {
+        $lines = [$lines];
+    }
+    foreach ($lines as $l) {
+        $l = rtrim((string) $l, "\r\n");
+        if ($l !== '') {
+            $logBuffer[] = $l;
+        }
+    }
+    // Tope: si Manager está caído, no crecer sin límite (descarta lo más viejo).
+    if (count($logBuffer) > 2000) {
+        $logBuffer = array_slice($logBuffer, -2000);
+    }
+}
+
+/**
+ * Envía el buffer al log central de Manager (POST /api/ferrawin/sync-log).
+ * No usa logMessage() para no recursar. En error de red/5xx reencola para reintentar;
+ * en 404 (endpoint sin desplegar) o 413 descarta el lote.
+ */
+function flushLogCentral(): void
+{
+    global $logBuffer, $apiConfig;
+    if (empty($logBuffer)) {
+        return;
+    }
+
+    $batch = array_splice($logBuffer, 0, 500);
+
+    $url = rtrim($apiConfig['base_url'], '/') . '/api/ferrawin/sync-log';
+    $ch  = curl_init($url);
+    $curlOpts = [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode(['hostname' => HOST_NAME, 'lines' => $batch]),
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiConfig['token'],
+            'Accept: application/json',
+        ],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 8,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ];
+    foreach ([
+        dirname(PHP_BINARY) . '/cacert.pem',
+        BASE_DIR . '/cacert.pem',
+        BASE_DIR . '/php_drivers/cacert.pem',
+    ] as $cacert) {
+        if (file_exists($cacert)) {
+            $curlOpts[CURLOPT_CAINFO] = $cacert;
+            break;
+        }
+    }
+    curl_setopt_array($ch, $curlOpts);
+
+    curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        if ($httpCode !== 404 && $httpCode !== 413) {
+            $logBuffer = array_merge($batch, $logBuffer);
+            if (count($logBuffer) > 2000) {
+                $logBuffer = array_slice($logBuffer, -2000);
+            }
+        }
+        echo '[' . date('Y-m-d H:i:s') . "] [WARNING] Log central no enviado (HTTP {$httpCode})\n";
+    }
 }
 
 /**
@@ -954,6 +1048,9 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             $newLines    = array_slice($allLines, $lastLogLine);
             $lastLogLine = count($allLines);
 
+            // Reenviar las líneas nuevas del log de sync-optimizado al log central de Manager
+            bufferLogCentral($newLines);
+
             // Recopilar entradas de planillas de las líneas nuevas
             $nuevasPlanillas = [];
             foreach ($newLines as $line) {
@@ -1186,6 +1283,11 @@ $loop->addPeriodicTimer(60, function() use ($testMode, &$autoSyncState) {
         logMessage("Auto-sync: lanzando sincronización incremental (han pasado " . round($elapsed / 60) . " min)");
         ejecutarSync(['modo' => 'incremental', 'target' => $autoSyncState['target'] ?? 'production'], $testMode);
     }
+});
+
+// Flush del log central cada 7 s: envía a Manager las líneas acumuladas en el buffer.
+$loop->addPeriodicTimer(7, function() {
+    flushLogCentral();
 });
 
 // Ejecutar el loop
