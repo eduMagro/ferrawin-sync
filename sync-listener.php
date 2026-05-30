@@ -216,6 +216,78 @@ function enviarEstado(string $status, ?string $progress = null, ?string $message
 }
 
 /**
+ * Reclama el turno de sincronización en el servidor (candado atómico cross-PC).
+ *
+ * Con varios PCs corriendo este listener, cada uno solo ve su propio sync.pid local,
+ * así que sincronizaActiva() no puede impedir que dos PCs sincronicen a la vez. El
+ * servidor es el único punto compartido: concede el turno a un solo hostname.
+ *
+ * Devuelve true si este PC puede sincronizar, false si otro PC ya está sincronizando.
+ * Ante error de red devuelve false (fail-closed): preferimos saltarnos un ciclo de
+ * auto-sync (se reintenta solo) antes que arriesgar dos PCs sincronizando a la vez.
+ */
+function reclamarSync(string $target): bool
+{
+    global $apiConfig;
+
+    $url = rtrim($apiConfig['base_url'], '/') . '/api/ferrawin/sync-claim';
+
+    $ch = curl_init($url);
+    $curlOpts = [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => json_encode(['hostname' => HOST_NAME]),
+        CURLOPT_HTTPHEADER     => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . $apiConfig['token'],
+            'Accept: application/json',
+        ],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 10,
+        CURLOPT_SSL_VERIFYPEER => true,
+    ];
+    foreach ([
+        dirname(PHP_BINARY) . '/cacert.pem',
+        BASE_DIR . '/cacert.pem',
+        BASE_DIR . '/php_drivers/cacert.pem',
+    ] as $cacert) {
+        if (file_exists($cacert)) {
+            $curlOpts[CURLOPT_CAINFO] = $cacert;
+            break;
+        }
+    }
+    curl_setopt_array($ch, $curlOpts);
+
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error    = curl_error($ch);
+
+    // 404 = el servidor aún no tiene el endpoint de claim desplegado: comportarse como antes
+    // (fail-open) para no bloquear syncs durante el despliegue del cambio en producción.
+    if ($httpCode === 404) {
+        logMessage("Claim de sync: endpoint no disponible (404) — servidor sin actualizar, se arranca igual", 'WARNING');
+        return true;
+    }
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        logMessage("Claim de sync: error API ({$httpCode}): {$error} — no se arranca por precaución", 'WARNING');
+        return false; // fail-closed ante errores reales (red/5xx)
+    }
+
+    $data    = json_decode($response, true) ?: [];
+    $granted = (bool) ($data['granted'] ?? false);
+
+    if (!$granted) {
+        $owner    = $data['owner'] ?? 'otro PC';
+        $progress = $data['progress'] ?? '?';
+        logMessage("Claim de sync DENEGADO: '{$owner}' ya está sincronizando ({$progress})", 'WARNING');
+    } else {
+        logMessage("Claim de sync CONCEDIDO para " . HOST_NAME);
+    }
+
+    return $granted;
+}
+
+/**
  * Ejecuta la sincronización con los parámetros especificados
  */
 function sincronizaActiva(): bool
@@ -298,6 +370,14 @@ function ejecutarSync(array $params, bool $testMode): void
     if (!$testMode && ($enGracia || sincronizaActiva())) {
         logMessage('Comando start ignorado: ya hay una sincronización en curso', 'WARNING');
         enviarEstado('busy', null, 'Ya hay una sincronización en curso. Detenla antes de iniciar una nueva.');
+        return;
+    }
+
+    // Candado cross-PC: el guardia local solo ve el sync.pid de ESTE PC. Con varios PCs
+    // (DORADO, etc.) pedimos turno al servidor para garantizar que solo uno sincronice.
+    if (!$testMode && !reclamarSync($target)) {
+        logMessage('Comando start ignorado: otro PC ya está sincronizando (claim denegado)', 'WARNING');
+        enviarEstado('busy', null, 'Otro PC ya está sincronizando. Solo un PC sincroniza a la vez.');
         return;
     }
 
@@ -825,10 +905,12 @@ $syncTarget = null;
 $lastProgress = null;
 $lastSyncCheck = 0;
 $syncLaunchedAt = 0; // timestamp del último lanzamiento — gracia para que sync.pid se escriba
+$lastLogLine = 0;    // última línea del log ya procesada (para no repetir entradas)
+$lastLogFile = null; // path del log activo (reset al cambiar de archivo)
 
 // Monitor de sincronización cada 10 segundos
 $loop->addPeriodicTimer(10, function() use ($testMode) {
-    global $syncYear, $syncTarget, $lastProgress, $lastSyncCheck;
+    global $syncYear, $syncTarget, $lastProgress, $lastSyncCheck, $lastLogLine, $lastLogFile;
 
     $pidFile = BASE_DIR . '/sync.pid';
 
@@ -859,30 +941,47 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
         }
 
         if ($isRunning && file_exists($logFile)) {
-            // Leer log completo para stats acumuladas; últimas 50 líneas para progreso
+            // Leer log completo para stats acumuladas
             $allLines = file($logFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $lines    = array_slice($allLines, -50);
 
-            $progress         = null;
-            $lastPlanilla     = null;
-            $lastPlanillaInfo = null;
-            $esActualizacion  = false;
+            // Reset tracking si el archivo de log cambió (nueva sync o rotación de log)
+            if ($logFile !== $lastLogFile) {
+                $lastLogLine = 0;
+                $lastLogFile = $logFile;
+            }
 
-            foreach (array_reverse($lines) as $line) {
-                if (preg_match('/\[(\d+)\/(\d+)\]/', $line, $matches)) {
-                    $progress = "{$matches[1]}/{$matches[2]}";
+            // Procesar solo las líneas nuevas desde la última lectura
+            $newLines    = array_slice($allLines, $lastLogLine);
+            $lastLogLine = count($allLines);
+
+            // Recopilar entradas de planillas de las líneas nuevas
+            $nuevasPlanillas = [];
+            foreach ($newLines as $line) {
+                $linProgress = null;
+                $linPlanilla = null;
+                $linEsAct    = false;
+                $linInfo     = null;
+
+                if (preg_match('/\[(\d+)\/(\d+)\]/', $line, $m)) {
+                    $linProgress = "{$m[1]}/{$m[2]}";
                 }
-                if (!$lastPlanilla && preg_match(
+                if (preg_match(
                     '/Preparando (\d{4}-\d+)(\s+\[ACTUALIZACIÓN\])?(?:\s+\|\s+(.+?))?\s+\(/',
                     $line,
-                    $planillaMatch
+                    $pm
                 )) {
-                    $lastPlanilla     = $planillaMatch[1];
-                    $esActualizacion  = !empty($planillaMatch[2]);
-                    $lastPlanillaInfo = isset($planillaMatch[3]) ? trim($planillaMatch[3]) : null;
+                    $linPlanilla = $pm[1];
+                    $linEsAct    = !empty($pm[2]);
+                    $linInfo     = isset($pm[3]) ? trim($pm[3]) : null;
                 }
-                if ($progress && $lastPlanilla) {
-                    break;
+
+                if ($linProgress && $linPlanilla) {
+                    $nuevasPlanillas[] = [
+                        'progress' => $linProgress,
+                        'planilla' => $linPlanilla,
+                        'esAct'    => $linEsAct,
+                        'info'     => $linInfo,
+                    ];
                 }
             }
 
@@ -911,17 +1010,11 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
             ];
             unset($allLines);
 
-            // Enviar running si el progreso cambió, o si el proceso acaba de arrancar
-            // y aún no hay patrón [N/M] (fase de verificación inicial)
-            $sinProgreso = ($progress === null && $lastProgress === null);
-            if (($progress && $progress !== $lastProgress) || $sinProgreso) {
-                if ($sinProgreso) {
-                    $lastProgress = 'verificando';
-                } else {
-                    $lastProgress = $progress;
-                }
+            $sinProgreso  = (empty($nuevasPlanillas) && $lastProgress === null);
+            $hayNovedades = !empty($nuevasPlanillas) || $sinProgreso;
 
-                // Contar procesos activos
+            if ($hayNovedades) {
+                // Contar procesos activos (una sola vez por tick)
                 exec('wmic process where "name=\'php.exe\' and commandline like \'%sync-listener%\'" get processid /format:list 2>NUL', $lLines);
                 $listenersCount = 0;
                 foreach ($lLines as $ll) {
@@ -936,14 +1029,25 @@ $loop->addPeriodicTimer(10, function() use ($testMode) {
                 }
                 unset($sLines);
 
-                $mensaje = $sinProgreso
-                    ? 'Analizando cambios en FerraWin...'
-                    : "Procesando {$lastPlanilla}";
-                enviarEstado('running', $progress, $mensaje, $syncYear, $lastPlanilla, null, $lastPlanillaInfo, $esActualizacion, [], [
-                    'listeners_count' => $listenersCount,
-                    'syncs_count'     => $syncsCount,
-                    'cum_stats'       => $cumStats,
-                ]);
+                if ($sinProgreso) {
+                    $lastProgress = 'verificando';
+                    enviarEstado('running', null, 'Analizando cambios en FerraWin...', $syncYear, null, null, null, false, [], [
+                        'listeners_count' => $listenersCount,
+                        'syncs_count'     => $syncsCount,
+                        'cum_stats'       => $cumStats,
+                    ]);
+                }
+
+                // Enviar una entrada por cada planilla nueva detectada en el log
+                foreach ($nuevasPlanillas as $entrada) {
+                    if ($entrada['progress'] === $lastProgress) continue;
+                    $lastProgress = $entrada['progress'];
+                    enviarEstado('running', $entrada['progress'], "Procesando {$entrada['planilla']}", $syncYear, $entrada['planilla'], null, $entrada['info'], $entrada['esAct'], [], [
+                        'listeners_count' => $listenersCount,
+                        'syncs_count'     => $syncsCount,
+                        'cum_stats'       => $cumStats,
+                    ]);
+                }
             }
         } elseif (!$isRunning) {
             // Proceso terminó - leer resumen detallado del log
