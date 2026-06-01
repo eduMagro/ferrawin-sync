@@ -228,41 +228,23 @@ if ($modoIncremental) {
             $datosFerrawin = FerrawinQuery::getAllFechasCalculo(array_keys($planillasExistentes));
 
             foreach (array_keys($planillasExistentes) as $codigo) {
-                $fechaManager    = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
-                $pesoManager     = isset($planillasExistentes[$codigo]['peso_total'])
-                    ? round((float) $planillasExistentes[$codigo]['peso_total'], 4)
-                    : null;
-                $doblesManager    = isset($planillasExistentes[$codigo]['total_dobleces'])
-                    ? (int) $planillasExistentes[$codigo]['total_dobleces']
-                    : null;
-                $barrasManager = isset($planillasExistentes[$codigo]['total_barras'])
-                    ? (int) $planillasExistentes[$codigo]['total_barras']
-                    : null;
+                $fechaManager = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
+                $fechaFW      = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
 
-                $fechaFW   = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
-                $pesoFW    = $datosFerrawin[$codigo]['peso_total'] ?? null;
-                $doblesFW  = isset($datosFerrawin[$codigo]['total_dobleces'])
-                    ? (int) $datosFerrawin[$codigo]['total_dobleces']
-                    : null;
-                $barrasFW  = isset($datosFerrawin[$codigo]['total_barras'])
-                    ? (int) $datosFerrawin[$codigo]['total_barras']
-                    : null;
+                // SOLO se compara fecha_calculo (MAX ZFECHACALC). Los ejes peso/dobleces/barras
+                // NO son comparables entre Manager y FerraWin: el importer EXPANDE cada elemento
+                // de una entidad de ensamblaje en N copias (una por miembro), de modo que
+                // SUM(peso)/SUM(barras)/SUM(dobles*barras) en Manager quedan multiplicados por el
+                // nº de miembros respecto a los valores raw de FerraWin. Comparar esos ejes marcaba
+                // ~3200 planillas con ensamblaje como "modificadas" en CADA sync, eternamente
+                // (medido: 14052 por peso, 1424 dobleces, 842 barras, 0 por fecha).
+                // ZFECHACALC se actualiza ante cualquier recálculo en FerraWin → es la única señal
+                // fiable de cambio real. Mismo criterio que `sync:ferrawin-push --reconciliar`.
+                $fechaCambiada = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
 
-                $fechaCambiada  = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
-                $pesoCambiado   = $pesoManager !== null && $pesoFW !== null
-                    && abs($pesoFW - $pesoManager) > 1.0;
-                $doblesCambiado = $doblesManager !== null && $doblesFW !== null
-                    && $doblesFW !== $doblesManager;
-                $barrasCambiado = $barrasManager !== null && $barrasFW !== null
-                    && $barrasFW !== $barrasManager;
-
-                if ($fechaCambiada || $pesoCambiado || $doblesCambiado || $barrasCambiado) {
+                if ($fechaCambiada) {
                     $codigosModificados[] = $codigo;
-                    if ($fechaCambiada)      $motivo = "fecha {$fechaManager}→{$fechaFW}";
-                    elseif ($pesoCambiado)   $motivo = "peso {$pesoManager}→{$pesoFW}";
-                    elseif ($doblesCambiado) $motivo = "dobleces {$doblesManager}→{$doblesFW}";
-                    else                     $motivo = "barras {$barrasManager}→{$barrasFW}";
-                    Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
+                    Logger::debug("  📝 {$codigo}: fecha {$fechaManager}→{$fechaFW} → MODIFICADA");
                 }
             }
 
