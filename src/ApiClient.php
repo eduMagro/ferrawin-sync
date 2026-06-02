@@ -225,6 +225,17 @@ class ApiClient
     }
 
     /**
+     * Envía un lote de huellas de contenido (hash) para backfill SIN re-importar.
+     *
+     * @param array $hashes Mapa codigo => hash (p.ej. ['2026-004040' => '31:..:..'])
+     * @return array Respuesta del servidor (success, recibidas, actualizadas, no_encontradas)
+     */
+    public function enviarBackfillHashes(array $hashes): array
+    {
+        return $this->post('api/ferrawin/backfill-hashes', ['hashes' => $hashes]);
+    }
+
+    /**
      * Consulta si hay una acción de control pendiente (stop/pause) establecida desde el Manager.
      * Retorna 'none', 'stop' o 'pause'. Falla silenciosamente devolviendo 'none'.
      */

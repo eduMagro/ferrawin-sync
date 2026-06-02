@@ -220,31 +220,47 @@ if ($modoIncremental) {
 
         // Detectar modificadas comparando TODAS las planillas de Manager contra FerraWin,
         // sin restricción de año. Así se detectan cambios en 2026 aunque el sync sea de 2022.
+        // Datos de FerraWin (fecha + HUELLA de contenido) para TODAS las que interesan:
+        // existentes (para detectar cambios) + nuevas (para tener su huella al importarlas
+        // por primera vez y poder adjuntarla al push). Una sola query SQL.
+        $codigosParaHash = array_values(array_unique(array_merge(
+            array_keys($planillasExistentes),
+            $codigosNuevos
+        )));
+        $datosFerrawin = !empty($codigosParaHash)
+            ? FerrawinQuery::getAllFechasCalculo($codigosParaHash)
+            : [];
+
         $codigosModificados = [];
         if (!empty($planillasExistentes)) {
             Logger::info("Verificando cambios en " . count($planillasExistentes) . " planillas existentes (todos los años)...");
 
-            // Obtener datos de FerraWin filtrando solo las que existen en Manager (O(n) PHP-side)
-            $datosFerrawin = FerrawinQuery::getAllFechasCalculo(array_keys($planillasExistentes));
-
             foreach (array_keys($planillasExistentes) as $codigo) {
+                $hashManager  = $planillasExistentes[$codigo]['hash'] ?? null;
+                $hashFW       = $datosFerrawin[$codigo]['hash'] ?? null;
                 $fechaManager = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
                 $fechaFW      = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
 
-                // SOLO se compara fecha_calculo (MAX ZFECHACALC). Los ejes peso/dobleces/barras
-                // NO son comparables entre Manager y FerraWin: el importer EXPANDE cada elemento
-                // de una entidad de ensamblaje en N copias (una por miembro), de modo que
-                // SUM(peso)/SUM(barras)/SUM(dobles*barras) en Manager quedan multiplicados por el
-                // nº de miembros respecto a los valores raw de FerraWin. Comparar esos ejes marcaba
-                // ~3200 planillas con ensamblaje como "modificadas" en CADA sync, eternamente
-                // (medido: 14052 por peso, 1424 dobleces, 842 barras, 0 por fecha).
-                // ZFECHACALC se actualiza ante cualquier recálculo en FerraWin → es la única señal
-                // fiable de cambio real. Mismo criterio que `sync:ferrawin-push --reconciliar`.
-                $fechaCambiada = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
+                // Señal PRIMARIA: HUELLA DE CONTENIDO (COUNT:SUM:CHECKSUM_AGG sobre las filas
+                // raw de ORD_BAR). Capta altas, bajas y ediciones — incluido el hueco que
+                // MAX(fecha_calculo) no ve (borrados puros que no mueven el máximo). Como el
+                // hash guardado en Manager lo calculó este mismo SQL en un sync anterior, la
+                // comparación es FerraWin-ahora vs FerraWin-antes: NO sufre la expansión de
+                // ensamblaje del importer que causaba el re-sync eterno de ~3000 planillas.
+                //
+                // FALLBACK (bootstrap): mientras una planilla no tenga hash guardado en
+                // Manager (NULL, p.ej. justo tras desplegar), se compara por fecha_calculo.
+                if ($hashManager !== null && $hashManager !== '' && $hashFW !== null) {
+                    $cambiada = ($hashManager !== $hashFW);
+                    $motivo   = $cambiada ? "hash {$hashManager}→{$hashFW}" : null;
+                } else {
+                    $cambiada = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
+                    $motivo   = $cambiada ? "fecha {$fechaManager}→{$fechaFW} (fallback)" : null;
+                }
 
-                if ($fechaCambiada) {
+                if ($cambiada) {
                     $codigosModificados[] = $codigo;
-                    Logger::debug("  📝 {$codigo}: fecha {$fechaManager}→{$fechaFW} → MODIFICADA");
+                    Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
                 }
             }
 
@@ -262,6 +278,10 @@ if ($modoIncremental) {
 
         // Set O(1) para saber qué códigos son actualizaciones (vs nuevas importaciones)
         $codigosModificadosSet = array_flip($codigosModificados);
+
+        // Huellas a adjuntar al payload del push (codigo → ['hash' => ...]). Ya las tenemos
+        // de la query de detección (cubre existentes + nuevas).
+        $hashesPorCodigo = $datosFerrawin;
 
     } catch (Exception $e) {
         Logger::error("Error obteniendo códigos existentes: " . $e->getMessage());
@@ -295,6 +315,14 @@ if ($total === 0) {
 
 // Set de modificadas para el log (puede estar vacío si no es modo --nuevas)
 $codigosModificadosSet = $codigosModificadosSet ?? [];
+
+// Huellas de contenido para adjuntar al push. En modo no incremental (o si faltara
+// alguna), se consultan aquí con el MISMO SQL que la detección.
+$hashesPorCodigo = $hashesPorCodigo ?? [];
+$codigosSinHash = array_values(array_filter($codigos, fn($c) => !isset($hashesPorCodigo[$c])));
+if (!empty($codigosSinHash)) {
+    $hashesPorCodigo = $hashesPorCodigo + FerrawinQuery::getAllFechasCalculo($codigosSinHash);
+}
 
 // Procesar planillas en batches
 $procesadas = 0;
@@ -368,6 +396,25 @@ foreach ($codigos as $i => $codigo) {
 
         $numElementos = count($planilla['elementos'] ?? []);
         $sinElementos = $planilla['sin_elementos'] ?? false;
+
+        // Adjuntar HUELLA DE CONTENIDO + SNAPSHOT JSON crudo:
+        //  - ferrawin_hash: lo que Manager guardará y comparará en la próxima detección.
+        //    Sale del MISMO SQL que la detección → comparación FerraWin-ahora vs -antes.
+        //  - snapshot: artefacto de auditoría (campos de fabricación por elemento, en el
+        //    orden ZCODLIN/ZELEMENTO de la query) para diffear bajo demanda qué cambió.
+        $planilla['ferrawin_hash'] = isset($hashesPorCodigo[$codigo]['hash'])
+            ? (string) $hashesPorCodigo[$codigo]['hash']
+            : null;
+        $snapElementos = array_map(fn($e) => [
+            'ferrawin_id'  => $e['ferrawin_id']  ?? '',
+            'diametro'     => $e['diametro']      ?? 0,
+            'longitud'     => $e['longitud']      ?? 0,
+            'dobles_barra' => $e['dobles_barra']  ?? 0,
+            'barras'       => $e['barras']        ?? 0,
+            'peso'         => $e['peso']          ?? 0,
+            'dimensiones'  => $e['dimensiones']   ?? '',
+        ], $planilla['elementos'] ?? []);
+        $planilla['snapshot'] = json_encode($snapElementos, JSON_UNESCAPED_UNICODE);
 
         $esActualizacion = isset($codigosModificadosSet[$codigo]);
         $marcador    = $esActualizacion ? ' [ACTUALIZACIÓN]' : '';

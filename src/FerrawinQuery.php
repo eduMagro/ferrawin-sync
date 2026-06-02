@@ -191,13 +191,32 @@ class FerrawinQuery
         // ZCONTA es el año (4 dígitos), ZCODIGO puede venir sin zero-padding (ej: '2531').
         // Normalizamos a 6 dígitos con RIGHT('000000'+ZCODIGO, 6) para que coincida
         // con los códigos que Manager almacena (ej: '2026-002531').
+        // HUELLA DE CONTENIDO (hash) compuesta por planilla, calculada sobre las filas
+        // RAW de ORD_BAR. Tres señales independientes para que sea robusta:
+        //   - COUNT(*)                         → capta altas/bajas de filas
+        //   - SUM(CAST(BINARY_CHECKSUM AS bigint)) → capta ediciones (aditivo: filas
+        //                                          idénticas NO se cancelan)
+        //   - CHECKSUM_AGG(BINARY_CHECKSUM)    → tercera señal (XOR)
+        // Para colisionar harían falta las TRES a la vez → imposible por accidente.
+        // Se incluyen ZCODLIN/ZELEMENTO (clave de fila) + los campos de fabricación.
+        // Es lo que se compara en la detección y lo que se almacena en Manager: como
+        // ambos lados salen del MISMO SQL sobre ORD_BAR, la comparación es FerraWin-ahora
+        // vs FerraWin-antes (sin el problema de la expansión de ensamblaje del importer).
+        $hashExpr = "BINARY_CHECKSUM(ob.ZCODLIN, ob.ZELEMENTO, ob.ZDIAMETRO, "
+            . "ob.ZCANTIDAD, ob.ZNUMBEND, ob.ZLONGTESTD, ob.ZPESOTESTD)";
+
         $sql = "
             SELECT
                 ob.ZCONTA + '-' + RIGHT('000000' + ob.ZCODIGO, 6) as codigo,
                 CONVERT(varchar(19), MAX(ob.ZFECHACALC), 120) as fecha_calculo,
                 SUM(ob.ZPESOTESTD) as peso_total,
                 SUM(ob.ZNUMBEND * ob.ZCANTIDAD) as total_dobleces,
-                SUM(ob.ZCANTIDAD) as total_barras
+                SUM(ob.ZCANTIDAD) as total_barras,
+                CONCAT(
+                    COUNT(*), ':',
+                    SUM(CAST($hashExpr AS bigint)), ':',
+                    CHECKSUM_AGG($hashExpr)
+                ) as hash
             FROM ORD_BAR ob
             GROUP BY ob.ZCONTA, ob.ZCODIGO
         ";
@@ -221,6 +240,7 @@ class FerrawinQuery
                     'peso_total'     => round((float) $row->peso_total, 4),
                     'total_dobleces' => (int) $row->total_dobleces,
                     'total_barras'   => (int) $row->total_barras,
+                    'hash'           => $row->hash !== null ? (string) $row->hash : null,
                 ];
             }
         }
