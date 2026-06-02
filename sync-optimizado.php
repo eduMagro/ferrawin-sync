@@ -241,26 +241,26 @@ if ($modoIncremental) {
                 $fechaManager = $planillasExistentes[$codigo]['fecha_calculo'] ?? null;
                 $fechaFW      = $datosFerrawin[$codigo]['fecha_calculo'] ?? null;
 
-                // Señal PRIMARIA: HUELLA DE CONTENIDO (COUNT:SUM:CHECKSUM_AGG sobre las filas
-                // raw de ORD_BAR). Capta altas, bajas y ediciones — incluido el hueco que
-                // MAX(fecha_calculo) no ve (borrados puros que no mueven el máximo). Como el
-                // hash guardado en Manager lo calculó este mismo SQL en un sync anterior, la
-                // comparación es FerraWin-ahora vs FerraWin-antes: NO sufre la expansión de
-                // ensamblaje del importer que causaba el re-sync eterno de ~3000 planillas.
-                //
-                // FALLBACK (bootstrap): mientras una planilla no tenga hash guardado en
-                // Manager (NULL, p.ej. justo tras desplegar), se compara por fecha_calculo.
-                if ($hashManager !== null && $hashManager !== '' && $hashFW !== null) {
-                    $cambiada = ($hashManager !== $hashFW);
-                    $motivo   = $cambiada ? "hash {$hashManager}→{$hashFW}" : null;
-                } else {
-                    $cambiada = $fechaFW && $fechaManager && $fechaFW !== $fechaManager;
-                    $motivo   = $cambiada ? "fecha {$fechaManager}→{$fechaFW} (fallback)" : null;
-                }
+                // Se marca modificada si cambia el HASH **O** la FECHA (no uno como fallback
+                // del otro: cada uno cubre un hueco del otro).
+                //  - HASH (COUNT:SUM:CHECKSUM_AGG sobre filas raw de ORD_BAR): capta altas,
+                //    bajas y ediciones de diámetro/barras/dobleces/longitud/peso. Incluye los
+                //    borrados puros que MAX(fecha) no ve. Comparación FerraWin-ahora vs
+                //    FerraWin-antes → inmune a la expansión de ensamblaje (origen del churn).
+                //  - FECHA (MAX ZFECHACALC): sube ante CUALQUIER recálculo en FerraWin, así
+                //    capta lo que el hash no cubre (reshape de la figura con mismos nº/long/peso,
+                //    cambio de marca, etc.). No reintroduce churn: el churn nunca vino de la
+                //    fecha (era peso/dobleces/barras), el fecha-only ya estaba convergido a ~0.
+                // Bootstrap: si Manager aún no tiene hash (NULL), solo aplica la fecha.
+                $hashCambiado  = ($hashManager !== null && $hashManager !== '' && $hashFW !== null && $hashManager !== $hashFW);
+                $fechaCambiada = ($fechaFW && $fechaManager && $fechaFW !== $fechaManager);
 
-                if ($cambiada) {
+                if ($hashCambiado || $fechaCambiada) {
+                    $motivos = [];
+                    if ($hashCambiado)  { $motivos[] = "hash {$hashManager}→{$hashFW}"; }
+                    if ($fechaCambiada) { $motivos[] = "fecha {$fechaManager}→{$fechaFW}"; }
                     $codigosModificados[] = $codigo;
-                    Logger::debug("  📝 {$codigo}: {$motivo} → MODIFICADA");
+                    Logger::debug("  📝 {$codigo}: " . implode(' + ', $motivos) . " → MODIFICADA");
                 }
             }
 

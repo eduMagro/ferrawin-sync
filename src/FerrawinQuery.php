@@ -182,7 +182,7 @@ class FerrawinQuery
      * Mucho más eficiente que getConteoElementos() en batches cuando hay miles de planillas.
      *
      * @param array|null $codigosFiltro Si se pasa, filtra los resultados en PHP (no en SQL)
-     * @return array Mapa de código => ['fecha_calculo' => string|null, 'peso_total' => float]
+     * @return array Mapa de código => ['fecha_calculo' => string|null, 'hash' => string|null]
      */
     public static function getAllFechasCalculo(?array $codigosFiltro = null): array
     {
@@ -205,13 +205,13 @@ class FerrawinQuery
         $hashExpr = "BINARY_CHECKSUM(ob.ZCODLIN, ob.ZELEMENTO, ob.ZDIAMETRO, "
             . "ob.ZCANTIDAD, ob.ZNUMBEND, ob.ZLONGTESTD, ob.ZPESOTESTD)";
 
+        // Detección por fecha_calculo + huella de contenido. Ya NO se calculan
+        // peso/dobleces/barras: no eran comparables (expansión de ensamblaje) y nadie
+        // los consume desde que la detección usa el hash → se eliminan (3 SUM menos).
         $sql = "
             SELECT
                 ob.ZCONTA + '-' + RIGHT('000000' + ob.ZCODIGO, 6) as codigo,
                 CONVERT(varchar(19), MAX(ob.ZFECHACALC), 120) as fecha_calculo,
-                SUM(ob.ZPESOTESTD) as peso_total,
-                SUM(ob.ZNUMBEND * ob.ZCANTIDAD) as total_dobleces,
-                SUM(ob.ZCANTIDAD) as total_barras,
                 CONCAT(
                     COUNT(*), ':',
                     SUM(CAST($hashExpr AS bigint)), ':',
@@ -221,7 +221,7 @@ class FerrawinQuery
             GROUP BY ob.ZCONTA, ob.ZCODIGO
         ";
 
-        Logger::info("Consultando fechas de cálculo + peso total de todas las planillas (query única)...");
+        Logger::info("Consultando fecha_calculo + huella de contenido de todas las planillas (query única)...");
 
         $stmt = $pdo->prepare($sql);
         $stmt->execute();
@@ -236,11 +236,8 @@ class FerrawinQuery
             $total++;
             if ($filtroSet === null || isset($filtroSet[$row->codigo])) {
                 $resultado[$row->codigo] = [
-                    'fecha_calculo'  => $row->fecha_calculo,
-                    'peso_total'     => round((float) $row->peso_total, 4),
-                    'total_dobleces' => (int) $row->total_dobleces,
-                    'total_barras'   => (int) $row->total_barras,
-                    'hash'           => $row->hash !== null ? (string) $row->hash : null,
+                    'fecha_calculo' => $row->fecha_calculo,
+                    'hash'          => $row->hash !== null ? (string) $row->hash : null,
                 ];
             }
         }
