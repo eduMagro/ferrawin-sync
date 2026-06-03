@@ -333,8 +333,13 @@ class FerrawinQuery
             LEFT JOIN ORD_DET od ON ob.ZCONTA = od.ZCONTA AND ob.ZCODIGO = od.ZCODIGO
                 AND ob.ZORDEN = od.ZORDEN AND ob.ZCODLIN = od.ZCODLIN
             LEFT JOIN PROJECT p ON oh.ZCODOBRA = p.ZCODIGO
-            LEFT JOIN PROD_DETO pd ON ob.ZCONTA = pd.ZCONTA AND ob.ZCODIGO = pd.ZCODPLA
+            LEFT JOIN (
+                SELECT ZCONTA, ZCODPLA, ZCODLIN, ZELEMENTO, ZETIQUETA,
+                       ROW_NUMBER() OVER (PARTITION BY ZCONTA, ZCODPLA, ZCODLIN, ZELEMENTO ORDER BY (SELECT NULL)) as rn
+                FROM PROD_DETO
+            ) pd ON ob.ZCONTA = pd.ZCONTA AND ob.ZCODIGO = pd.ZCODPLA
                 AND ob.ZCODLIN = pd.ZCODLIN AND ob.ZELEMENTO = pd.ZELEMENTO
+                AND pd.rn = 1
             WHERE ob.ZCONTA = :zconta AND ob.ZCODIGO = :zcodigo
             ORDER BY ob.ZCODLIN, ob.ZELEMENTO
         ";
