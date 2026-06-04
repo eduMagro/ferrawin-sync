@@ -397,6 +397,15 @@ foreach ($codigos as $i => $codigo) {
         $numElementos = count($planilla['elementos'] ?? []);
         $sinElementos = $planilla['sin_elementos'] ?? false;
 
+        // Protección: planillas cuya OBRA no resuelve en FerraWin (ZCODOBRA apunta a un
+        // PROJECT borrado, o cabecera sin obra) → no se pueden colocar en Manager. Se OMITEN
+        // (no se envían) en vez de mandarlas para que el servidor las descarte cada ciclo.
+        if (trim($planilla['codigo_obra'] ?? '') === '') {
+            Logger::info("{$progreso} OMITIDA {$codigo}: sin obra válida en FerraWin (ZCODOBRA inexistente o vacío)");
+            $omitidasSinObra = ($omitidasSinObra ?? 0) + 1;
+            continue;
+        }
+
         // Adjuntar HUELLA DE CONTENIDO + SNAPSHOT JSON crudo:
         //  - ferrawin_hash: lo que Manager guardará y comparará en la próxima detección.
         //    Sale del MISMO SQL que la detección → comparación FerraWin-ahora vs -antes.

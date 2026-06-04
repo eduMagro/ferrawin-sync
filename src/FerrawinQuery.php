@@ -218,6 +218,10 @@ class FerrawinQuery
                     CHECKSUM_AGG($hashExpr)
                 ) as hash
             FROM ORD_BAR ob
+            -- Excluir filas basura con ZCONTA/ZCODIGO en blanco (generaban una 'planilla -'
+            -- fantasma que se re-detectaba como nueva en cada ciclo). WHERE sobre ORD_BAR, no
+            -- toca el hash (que se agrega sobre las filas que quedan).
+            WHERE LTRIM(RTRIM(ob.ZCONTA)) <> '' AND LTRIM(RTRIM(ob.ZCODIGO)) <> ''
             GROUP BY ob.ZCONTA, ob.ZCODIGO
         ";
 
