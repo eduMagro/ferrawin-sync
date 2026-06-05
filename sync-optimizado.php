@@ -255,10 +255,33 @@ if ($modoIncremental) {
                 $hashCambiado  = ($hashManager !== null && $hashManager !== '' && $hashFW !== null && $hashManager !== $hashFW);
                 $fechaCambiada = ($fechaFW && $fechaManager && $fechaFW !== $fechaManager);
 
-                if ($hashCambiado || $fechaCambiada) {
+                // EJES DE CONTENIDO (app-vs-FerraWin): peso/barras/dobleces. Captan desviaciones
+                // del lado APP que el hash (FerraWin-vs-FerraWin) no ve — p. ej. planillas con
+                // barras/peso inflados por un importer antiguo (cuyo fecha_calculo en FerraWin
+                // no ha cambiado, así que ni hash ni fecha las re-detectan). FerraWin ya excluye
+                // los indicadores de espiral en estos agregados → casan con la app sin churn.
+                // Solo se evalúan si Manager devolvió agregados (planilla con elementos activos):
+                // si son null (planilla solo-cabecera o Manager sin desplegar) se omiten y se cae
+                // a hash/fecha.
+                $UMBRAL_PESO = 1.0; // kg — tolera el redondeo por elemento del importer
+                $pesoApp     = $planillasExistentes[$codigo]['peso']     ?? null;
+                $barrasApp   = $planillasExistentes[$codigo]['barras']   ?? null;
+                $doblecesApp = $planillasExistentes[$codigo]['dobleces'] ?? null;
+                $pesoFW      = $datosFerrawin[$codigo]['peso']     ?? null;
+                $barrasFW    = $datosFerrawin[$codigo]['barras']   ?? null;
+                $doblecesFW  = $datosFerrawin[$codigo]['dobleces'] ?? null;
+
+                $pesoCambiado     = ($pesoApp !== null && $pesoFW !== null && abs($pesoFW - $pesoApp) > $UMBRAL_PESO);
+                $barrasCambiado   = ($barrasApp !== null && $barrasFW !== null && (int) $barrasApp !== (int) $barrasFW);
+                $doblecesCambiado = ($doblecesApp !== null && $doblecesFW !== null && (int) $doblecesApp !== (int) $doblecesFW);
+
+                if ($hashCambiado || $fechaCambiada || $pesoCambiado || $barrasCambiado || $doblecesCambiado) {
                     $motivos = [];
-                    if ($hashCambiado)  { $motivos[] = "hash {$hashManager}→{$hashFW}"; }
-                    if ($fechaCambiada) { $motivos[] = "fecha {$fechaManager}→{$fechaFW}"; }
+                    if ($hashCambiado)     { $motivos[] = "hash {$hashManager}→{$hashFW}"; }
+                    if ($fechaCambiada)    { $motivos[] = "fecha {$fechaManager}→{$fechaFW}"; }
+                    if ($pesoCambiado)     { $motivos[] = "peso app={$pesoApp}→fw={$pesoFW}"; }
+                    if ($barrasCambiado)   { $motivos[] = "barras app={$barrasApp}→fw={$barrasFW}"; }
+                    if ($doblecesCambiado) { $motivos[] = "dobleces app={$doblecesApp}→fw={$doblecesFW}"; }
                     $codigosModificados[] = $codigo;
                     Logger::debug("  📝 {$codigo}: " . implode(' + ', $motivos) . " → MODIFICADA");
                 }

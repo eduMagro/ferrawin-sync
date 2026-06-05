@@ -182,7 +182,9 @@ class FerrawinQuery
      * Mucho más eficiente que getConteoElementos() en batches cuando hay miles de planillas.
      *
      * @param array|null $codigosFiltro Si se pasa, filtra los resultados en PHP (no en SQL)
-     * @return array Mapa de código => ['fecha_calculo' => string|null, 'hash' => string|null]
+     * @return array Mapa de código => ['fecha_calculo' => string|null, 'hash' => string|null,
+     *               'barras' => int|null, 'peso' => float|null, 'dobleces' => int|null]
+     *               (barras/peso/dobleces excluyen indicadores de espiral, igual que el importer)
      */
     public static function getAllFechasCalculo(?array $codigosFiltro = null): array
     {
@@ -205,9 +207,20 @@ class FerrawinQuery
         $hashExpr = "BINARY_CHECKSUM(ob.ZCODLIN, ob.ZELEMENTO, ob.ZDIAMETRO, "
             . "ob.ZCANTIDAD, ob.ZNUMBEND, ob.ZLONGTESTD, ob.ZPESOTESTD)";
 
-        // Detección por fecha_calculo + huella de contenido. Ya NO se calculan
-        // peso/dobleces/barras: no eran comparables (expansión de ensamblaje) y nadie
-        // los consume desde que la detección usa el hash → se eliminan (3 SUM menos).
+        // Detección por fecha_calculo + huella de contenido (hash) + AGREGADOS DE CONTENIDO
+        // (peso/barras/dobleces). El hash es FerraWin-vs-FerraWin (capta cambios en FerraWin);
+        // los agregados se comparan contra los de la app (FerraWin-vs-app) para detectar
+        // desviaciones del lado app que el hash no ve (p. ej. barras/peso inflados por un
+        // importer antiguo).
+        //
+        // CLAVE anti-churn: se EXCLUYEN los indicadores de espiral helicoidal (ZFIGURA que
+        // empieza por "1\t0d\t1\t0d", ayuda de dibujo NO fabricable) — exactamente como hace
+        // el importer del Manager. Sin esto, todo pilote/helicoidal pesaría más en FerraWin
+        // que en la app y se re-detectaría siempre. El hash NO se filtra (sigue agregándose
+        // sobre todas las filas: es FerraWin-vs-FerraWin y debe captar cualquier cambio).
+        // dobleces = SUM(ZNUMBEND*ZCANTIDAD) para casar con app SUM(dobles_barra*barras).
+        $noEspiral = "(ob.ZFIGURA IS NULL OR ob.ZFIGURA NOT LIKE '1' + CHAR(9) + '0d' + CHAR(9) + '1' + CHAR(9) + '0d' + '%')";
+
         $sql = "
             SELECT
                 ob.ZCONTA + '-' + RIGHT('000000' + ob.ZCODIGO, 6) as codigo,
@@ -216,7 +229,13 @@ class FerrawinQuery
                     COUNT(*), ':',
                     SUM(CAST($hashExpr AS bigint)), ':',
                     CHECKSUM_AGG($hashExpr)
-                ) as hash
+                ) as hash,
+                SUM(CASE WHEN {$noEspiral} THEN ob.ZCANTIDAD ELSE 0 END) as barras,
+                SUM(CASE WHEN {$noEspiral} THEN
+                    (CASE WHEN ob.ZPESOTESTD > 0 THEN ob.ZPESOTESTD
+                          ELSE (ob.ZLONGTESTD / 1000.0) * (CAST(ob.ZDIAMETRO AS FLOAT) * CAST(ob.ZDIAMETRO AS FLOAT) * 0.00617) * ob.ZCANTIDAD END)
+                    ELSE 0 END) as peso,
+                SUM(CASE WHEN {$noEspiral} THEN ob.ZNUMBEND * ob.ZCANTIDAD ELSE 0 END) as dobleces
             FROM ORD_BAR ob
             -- Excluir filas basura con ZCONTA/ZCODIGO en blanco (generaban una 'planilla -'
             -- fantasma que se re-detectaba como nueva en cada ciclo). WHERE sobre ORD_BAR, no
@@ -242,6 +261,9 @@ class FerrawinQuery
                 $resultado[$row->codigo] = [
                     'fecha_calculo' => $row->fecha_calculo,
                     'hash'          => $row->hash !== null ? (string) $row->hash : null,
+                    'barras'        => $row->barras   !== null ? (int) $row->barras : null,
+                    'peso'          => $row->peso     !== null ? round((float) $row->peso, 2) : null,
+                    'dobleces'      => $row->dobleces !== null ? (int) $row->dobleces : null,
                 ];
             }
         }
