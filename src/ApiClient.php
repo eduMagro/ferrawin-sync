@@ -277,8 +277,12 @@ class ApiClient
         $response = $this->get('api/ferrawin/codigos-existentes?con_conteo=1');
 
         if (!($response['success'] ?? false)) {
-            Logger::error("Error obteniendo códigos con conteo: " . ($response['error'] ?? 'desconocido'));
-            return [];
+            // NUNCA devolver [] ante un fallo de red/timeout: el llamador lo
+            // interpretaría como "0 planillas ya sincronizadas" y marcaría TODA
+            // la BD como nueva (re-sync completo). Lanzar para abortar el sync.
+            $err = $response['error'] ?? 'desconocido';
+            Logger::error("Error obteniendo códigos con conteo: {$err}");
+            throw new \Exception("No se pudo obtener códigos existentes (con conteo): {$err}");
         }
 
         return $response['data']['planillas'] ?? [];
