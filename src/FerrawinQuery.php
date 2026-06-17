@@ -277,6 +277,46 @@ class FerrawinQuery
     }
 
     /**
+     * Devuelve el SET (codigo => true) de planillas cuya OBRA no resuelve en FerraWin:
+     * ZCODOBRA vacío, o apunta a un PROJECT inexistente (LEFT JOIN sin match). Son las
+     * que el bucle de proceso OMITE más abajo ("sin obra válida"); detectarlas aquí
+     * permite excluirlas ANTES de descargar sus elementos/ensamblajes en cada ciclo.
+     *
+     * Usa el MISMO join que la guardia in-loop (getDatosPlanilla: codigo_obra = p.ZCODIGO
+     * vía LEFT JOIN PROJECT ON oh.ZCODOBRA = p.ZCODIGO), así que es consistente por
+     * construcción: lo que aquí se marca sin obra es exactamente lo que el proceso
+     * omitiría → imposible descartar una planilla que sí se aceptaría.
+     *
+     * Mismo formato de código (ZCONTA-ZCODIGO con padding a 6) que getAllFechasCalculo,
+     * para casar con los códigos comparados en la detección de modificadas.
+     */
+    public static function getCodigosSinObra(): array
+    {
+        $pdo = Database::getConnection();
+
+        $sql = "
+            SELECT oh.ZCONTA + '-' + RIGHT('000000' + oh.ZCODIGO, 6) as codigo
+            FROM ORD_HEAD oh
+            LEFT JOIN PROJECT p ON oh.ZCODOBRA = p.ZCODIGO
+            WHERE p.ZCODIGO IS NULL OR LTRIM(RTRIM(p.ZCODIGO)) = ''
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute();
+
+        $resultado = [];
+        while ($row = $stmt->fetch()) {
+            $resultado[$row->codigo] = true;
+        }
+
+        Logger::info("Planillas sin obra válida en FerraWin (pre-filtro)", [
+            'total' => count($resultado),
+        ]);
+
+        return $resultado;
+    }
+
+    /**
      * Obtiene solo la cabecera de una planilla (sin elementos).
      */
     public static function getCabeceraPlanilla(string $codigo): ?object

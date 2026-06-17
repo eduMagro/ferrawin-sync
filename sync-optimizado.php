@@ -290,6 +290,26 @@ if ($modoIncremental) {
             Logger::info("Planillas modificadas detectadas: " . count($codigosModificados));
         }
 
+        // PRE-FILTRO de planillas cuya OBRA no resuelve en FerraWin (ZCODOBRA vacío o
+        // PROJECT inexistente). El bucle de proceso las OMITE igualmente más abajo, pero
+        // hacerlo aquí evita descargar sus elementos/ensamblajes en CADA ciclo (una de
+        // ellas tardaba ~80s cargando 151 ensamblajes solo para descartarse) y deja de
+        // inflar el contador "/N". Mismo criterio que la guardia in-loop (LEFT JOIN
+        // PROJECT ON ZCODOBRA = ZCODIGO → codigo_obra vacío), así que NO puede excluir
+        // ninguna que el proceso sí aceptaría. La guardia in-loop se mantiene como red de
+        // seguridad (rebuild/histórico/código-específico no pasan por esta detección).
+        $sinObra = FerrawinQuery::getCodigosSinObra();
+        if (!empty($sinObra)) {
+            $nuevasAntes = count($codigosNuevos);
+            $modifAntes  = count($codigosModificados);
+            $codigosNuevos      = array_values(array_filter($codigosNuevos,      fn($c) => !isset($sinObra[$c])));
+            $codigosModificados = array_values(array_filter($codigosModificados, fn($c) => !isset($sinObra[$c])));
+            $excluidas = ($nuevasAntes - count($codigosNuevos)) + ($modifAntes - count($codigosModificados));
+            if ($excluidas > 0) {
+                Logger::info("Pre-filtro obra inválida: {$excluidas} planilla(s) excluidas antes de procesar (sin ZCODOBRA válido en FerraWin)");
+            }
+        }
+
         // Mezclar y ordenar todo junto DESC para garantizar orden coherente
         // (antes: nuevas primero → modificadas después, causaba saltos de código)
         $codigos = array_values(array_merge($codigosNuevos, $codigosModificados));
